@@ -153,3 +153,39 @@ export function useDestinationIndex() {
   }, []);
   return { destinations, error };
 }
+
+// Cursor history belongs in the URL so copied links and Back restore the same page.
+export function useListRoute(path: string) {
+  const route = useRoute();
+  const params = new URLSearchParams(route.split('?')[1]);
+  const history = ['', ...params.getAll('page')];
+  function update(values: Record<string, string>, pages = ['']) {
+    const next = new URLSearchParams(params);
+    next.delete('page');
+    next.delete('compose');
+    for (const [key, value] of Object.entries(values)) {
+      if (value) next.set(key, value);
+      else next.delete(key);
+    }
+    for (const cursor of pages.slice(1)) next.append('page', cursor);
+    navigate(`${path}${next.size ? `?${next.toString()}` : ''}`);
+  }
+  return {
+    params,
+    history,
+    update,
+    setHistory: (pages: string[]) => update({}, pages),
+  };
+}
+export function returnRoute(fallback: string): string {
+  const value = new URLSearchParams(window.location.hash.split('?')[1]).get(
+    'return_to',
+  );
+  return value && /^\/(events|deliveries)(\?|$)/.test(value) ? value : fallback;
+}
+export function detailLink(
+  path: string,
+  returnTo = returnRoute(window.location.hash.slice(1)),
+) {
+  return `#${path}?${new URLSearchParams({ return_to: returnTo })}`;
+}

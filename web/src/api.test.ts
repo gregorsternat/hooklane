@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   APIError,
   delivery,
+  deliveryDetail,
+  destination,
   event,
   page,
   request,
@@ -156,5 +158,86 @@ describe('API transport', () => {
     controller.abort();
     await pending;
     expect(signal?.aborted).toBe(true);
+  });
+});
+
+describe('investigation response boundary', () => {
+  const sampleDestination = {
+    id: 'destination-1',
+    name: 'Receiver',
+    url: 'https://example.com/hook',
+    enabled: false,
+    archived: false,
+    revision: 2,
+    created_at: sampleEvent.created_at,
+    updated_at: sampleEvent.created_at,
+  };
+  const detail = {
+    delivery: {
+      id: 'delivery-1',
+      event_id: sampleEvent.id,
+      destination_id: sampleDestination.id,
+      status: 'dead',
+      attempt_count: 1,
+      next_attempt_at: null,
+      last_status_code: 0,
+      last_error: 'tls_error',
+      created_at: sampleEvent.created_at,
+      updated_at: sampleEvent.created_at,
+    },
+    destination: sampleDestination,
+    attempts: [
+      {
+        id: 'attempt-1',
+        number: 1,
+        destination_revision: null,
+        status: 'dead',
+        status_code: 0,
+        error_code: 'tls_error',
+        duration_ms: 20,
+        started_at: sampleEvent.created_at,
+        finished_at: sampleEvent.created_at,
+      },
+    ],
+    max_attempts: 8,
+    scheduling_state: 'terminal',
+    replay: { eligible: true, reason: null },
+    recovered_by: 'delivery-2',
+  };
+  it('rejects malformed concurrency and eligibility metadata', () => {
+    expect(() => destination({ ...sampleDestination, revision: '2' })).toThrow(
+      'unexpected response',
+    );
+    expect(() =>
+      deliveryDetail({
+        ...detail,
+        replay: { eligible: 'false', reason: null },
+      }),
+    ).toThrow('unexpected response');
+    expect(() =>
+      deliveryDetail({
+        ...detail,
+        replay: { eligible: false, reason: 'private_raw_error' },
+      }),
+    ).toThrow('unexpected response');
+    expect(() =>
+      deliveryDetail({ ...detail, scheduling_state: 'invented' }),
+    ).toThrow('unexpected response');
+  });
+  it('strips sensitive fields from expanded nested read data and preserves unknown historical revisions', () => {
+    const parsed = deliveryDetail({
+      ...detail,
+      payload: 'private-event-body',
+      destination: {
+        ...sampleDestination,
+        signing_secret: 'private-signing-secret',
+      },
+      attempts: [
+        { ...detail.attempts[0], error_message: 'private-raw-transport-error' },
+      ],
+    });
+    expect(parsed.attempts[0]?.destination_revision).toBeNull();
+    expect(parsed.recovered_by).toBe('delivery-2');
+    expect(JSON.stringify(parsed)).not.toContain('private-');
   });
 });

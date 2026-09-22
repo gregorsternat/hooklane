@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type { FormEvent } from 'react';
-import { destination, ingestResult, request, safeURL } from './api';
+import { APIError, destination, ingestResult, request, safeURL } from './api';
 import type { Destination } from './api';
 import {
   Button,
@@ -33,6 +33,8 @@ export function DestinationForm({
   const [secret, setSecret] = useState('');
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
   const [inputError, setInputError] = useState('');
+  const [revision, setRevision] = useState(initial?.revision);
+  const [latest, setLatest] = useState<Destination | null>(null);
   const mutation = useMutation();
   async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -57,22 +59,39 @@ export function DestinationForm({
       setInputError('The signing secret must contain at least 32 bytes.');
       return;
     }
-    const result = await mutation.run((signal) =>
-      request(
-        initial ? `/destinations/${initial.id}` : '/destinations',
-        destination,
-        {
-          method: initial ? 'PUT' : 'POST',
-          signal,
-          body: JSON.stringify({
-            name: name.trim(),
-            url: url.trim(),
-            signing_secret: secret,
-            enabled,
-          }),
-        },
-      ),
-    );
+    const result = await mutation.run(async (signal) => {
+      try {
+        return await request(
+          initial ? `/destinations/${initial.id}` : '/destinations',
+          destination,
+          {
+            method: initial ? 'PUT' : 'POST',
+            signal,
+            headers: initial ? { 'If-Match': `"${revision}"` } : undefined,
+            body: JSON.stringify({
+              name: name.trim(),
+              url: url.trim(),
+              signing_secret: secret,
+              enabled,
+            }),
+          },
+        );
+      } catch (error) {
+        if (
+          initial &&
+          error instanceof APIError &&
+          error.code === 'destination_conflict'
+        ) {
+          const current = await request(
+            `/destinations/${initial.id}`,
+            destination,
+            { signal },
+          );
+          setLatest(current);
+        }
+        throw error;
+      }
+    });
     if (result) {
       setSecret('');
       onSaved(result);
@@ -145,6 +164,35 @@ export function DestinationForm({
             <label htmlFor="destination-enabled">Enable delivery</label>
           </div>
           <ErrorBox message={inputError || mutation.error} />
+          {latest && (
+            <div className="info-note">
+              <strong>Latest configuration · revision {latest.revision}</strong>
+              <p>
+                {latest.name} · {safeURL(latest.url)} ·{' '}
+                {latest.archived
+                  ? 'Archived'
+                  : latest.enabled
+                    ? 'Active'
+                    : 'Paused'}
+              </p>
+              <p>
+                Your draft above has been kept. Review it against these changes
+                before saving.
+              </p>
+              {!latest.archived && (
+                <Button
+                  type="button"
+                  className="button small"
+                  onClick={() => {
+                    setRevision(latest.revision);
+                    setLatest(null);
+                  }}
+                >
+                  Use latest revision and keep my draft
+                </Button>
+              )}
+            </div>
+          )}
         </div>
         <footer className="modal-footer">
           <Button
@@ -158,7 +206,7 @@ export function DestinationForm({
           <Button
             type="submit"
             className="button primary"
-            disabled={mutation.pending}
+            disabled={mutation.pending || latest !== null}
           >
             {mutation.pending
               ? 'Saving…'
@@ -186,6 +234,7 @@ export function EventComposer({
   );
   const [inputError, setInputError] = useState('');
   const [submitted, setSubmitted] = useState(false);
+  const uncertainAcceptance = useRef(false);
   const mutation = useMutation();
   const idempotencyKey = useStableKey();
   async function submit(e: FormEvent<HTMLFormElement>) {
@@ -213,6 +262,21 @@ export function EventComposer({
           type: type.trim(),
           payload: parsed,
         }),
+      }).catch((error: unknown) => {
+        // Only known validation refusals prove this submission was not accepted.
+        // Transport failures, proxy errors and conflicts keep its exact content frozen.
+        const rejected =
+          error instanceof APIError &&
+          [
+            'invalid_event',
+            'invalid_json',
+            'invalid_idempotency_key',
+            'payload_too_large',
+          ].includes(error.code) &&
+          [400, 413, 422].includes(error.status);
+        if (rejected && !uncertainAcceptance.current) setSubmitted(false);
+        else uncertainAcceptance.current = true;
+        throw error;
       }),
     );
     if (result) {
@@ -276,8 +340,10 @@ export function EventComposer({
           </div>
           {submitted && !mutation.pending && mutation.error && (
             <p className="info-note">
-              Retry keeps the same content and idempotency key. Close this
-              dialog to compose a different event.
+              Acceptance is uncertain or this request conflicts with existing
+              work. Retry keeps the exact same content and idempotency key.
+              Check delivery history before closing this dialog to compose a
+              different event.
             </p>
           )}
           <ErrorBox message={inputError || mutation.error || index.error} />

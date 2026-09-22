@@ -933,3 +933,26 @@ pre {
     transition-duration: 0.01ms !important;
   }
 }
+
+.overview-scope {
+  margin-bottom: 24px;
+}
+.overview-scope p + p {
+  margin-top: 8px;
+}
+.record-lookup {
+  margin-bottom: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.destination-name .text-link {
+  margin-left: 8px;
+  font-size: 12px;
+}
+a.metric {
+  color: inherit;
+  text-decoration: none;
+}
+a.metric:hover {
+  border-color: var(--muted-foreground);
+}

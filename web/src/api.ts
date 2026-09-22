@@ -6,6 +6,7 @@ export interface Destination {
   url: string;
   enabled: boolean;
   archived: boolean;
+  revision: number;
   created_at: string;
   updated_at: string;
 }
@@ -34,6 +35,7 @@ export interface Delivery {
 export interface Attempt {
   id: string;
   number: number;
+  destination_revision: number | null;
   status: string;
   status_code: number;
   error_code: string;
@@ -50,6 +52,10 @@ export interface Stats {
   succeeded: number;
   dead: number;
   canceled: number;
+  paused: number;
+  eligible: number;
+  scheduled: number;
+  oldest_eligible_queued_age_seconds: number;
 }
 export interface Page<T> {
   items: T[];
@@ -58,11 +64,31 @@ export interface Page<T> {
 export interface EventDetail {
   event: WebhookEvent;
   deliveries: Delivery[];
+  recovered_by: string | null;
 }
 export interface DeliveryDetail {
   delivery: Delivery;
   attempts: Attempt[];
+  destination: Destination;
+  max_attempts: number;
+  scheduling_state: SchedulingState;
+  replay: { eligible: boolean; reason: ReplayReason };
+  recovered_by: string | null;
 }
+export type ReplayReason =
+  null | 'payload_redacted' | 'destination_archived' | 'delivery_not_terminal';
+const schedulingStates = [
+  'terminal',
+  'delivering',
+  'destination_archived',
+  'waiting_for_resume',
+  'attempts_exhausted',
+  'payload_redacted',
+  'scheduled',
+  'eligible',
+  'unscheduled',
+] as const;
+export type SchedulingState = (typeof schedulingStates)[number];
 export type Decoder<T> = (value: unknown) => T;
 
 function invalid(): never {
@@ -119,6 +145,7 @@ export function destination(value: unknown): Destination {
     url: str(r.url),
     enabled: bool(r.enabled),
     archived: bool(r.archived),
+    revision: num(r.revision),
     created_at: date(r.created_at),
     updated_at: date(r.updated_at),
   };
@@ -158,6 +185,8 @@ export function attempt(value: unknown): Attempt {
   return {
     id: str(r.id),
     number: num(r.number),
+    destination_revision:
+      r.destination_revision === null ? null : num(r.destination_revision),
     status: str(r.status),
     status_code: num(r.status_code),
     error_code: str(r.error_code),
@@ -186,17 +215,43 @@ export function stats(value: unknown): Stats {
     succeeded: num(r.succeeded),
     dead: num(r.dead),
     canceled: num(r.canceled),
+    paused: num(r.paused),
+    eligible: num(r.eligible),
+    scheduled: num(r.scheduled),
+    oldest_eligible_queued_age_seconds: num(
+      r.oldest_eligible_queued_age_seconds,
+    ),
   };
 }
 export function eventDetail(value: unknown): EventDetail {
   const r = record(value);
-  return { event: event(r.event), deliveries: array(r.deliveries, delivery) };
+  return {
+    event: event(r.event),
+    deliveries: array(r.deliveries, delivery),
+    recovered_by: r.recovered_by === null ? null : str(r.recovered_by),
+  };
 }
 export function deliveryDetail(value: unknown): DeliveryDetail {
   const r = record(value);
+  const replay = record(r.replay);
+  const reason = replay.reason;
+  if (
+    reason !== null &&
+    reason !== 'payload_redacted' &&
+    reason !== 'destination_archived' &&
+    reason !== 'delivery_not_terminal'
+  )
+    return invalid();
+  const scheduling = str(r.scheduling_state);
+  if (!schedulingStates.some((state) => state === scheduling)) return invalid();
   return {
     delivery: delivery(r.delivery),
     attempts: array(r.attempts, attempt),
+    destination: destination(r.destination),
+    max_attempts: num(r.max_attempts),
+    scheduling_state: scheduling as SchedulingState,
+    replay: { eligible: bool(replay.eligible), reason },
+    recovered_by: r.recovered_by === null ? null : str(r.recovered_by),
   };
 }
 export function session(value: unknown): boolean {
@@ -227,9 +282,11 @@ export function noContent(): undefined {
 }
 export class APIError extends Error {
   readonly status: number;
-  constructor(status: number, message: string) {
+  readonly code: string;
+  constructor(status: number, message: string, code = '') {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
 // Keep server diagnostics and proxy error bodies out of the interface.
@@ -238,6 +295,18 @@ function errorMessage(status: number, code: string): string {
   if (status === 403)
     return 'This action is not allowed. Check the server configuration.';
   if (status === 404) return 'This record could not be found.';
+  if (code === 'destination_conflict')
+    return 'This destination changed after you opened it. Your draft is preserved. Review the latest configuration before saving again.';
+  if (code === 'precondition_required')
+    return 'Reload this destination before editing so its current revision can be checked.';
+  if (code === 'payload_redacted')
+    return 'The payload was permanently redacted. This event cannot be replayed.';
+  if (code === 'destination_unavailable' || code === 'destination_archived')
+    return 'The destination is archived. New events and replays are unavailable; create a new destination if needed.';
+  if (code === 'delivery_not_terminal')
+    return 'The delivery is still active. Refresh after it finishes to check replay availability.';
+  if (code === 'idempotency_conflict')
+    return 'This idempotency key already belongs to different content. Inspect the original request before starting a new event.';
   if (status === 409)
     return 'This record changed or the action is no longer available. Refresh and try again.';
   if (status === 413)
@@ -278,7 +347,11 @@ export async function request<T>(
       }
       if (response.status === 401 && path !== '/session')
         window.dispatchEvent(new window.Event('hooklane:unauthorized'));
-      throw new APIError(response.status, errorMessage(response.status, code));
+      throw new APIError(
+        response.status,
+        errorMessage(response.status, code),
+        code,
+      );
     }
     if (response.status === 204) return decoder(undefined);
     const data: unknown = await response.json();

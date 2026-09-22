@@ -18,7 +18,13 @@ import {
   statuses,
   terminal,
 } from './api';
-import type { Delivery, Destination, WebhookEvent } from './api';
+import type {
+  Delivery,
+  Destination,
+  WebhookEvent,
+  ReplayReason,
+  SchedulingState,
+} from './api';
 import {
   Badge,
   Button,
@@ -43,6 +49,9 @@ import {
   useQuery,
   useStableKey,
   useDestinationIndex,
+  useListRoute,
+  detailLink,
+  returnRoute,
 } from './hooks';
 import { shortID } from './format';
 
@@ -75,12 +84,15 @@ function DestinationCell({
   destinations: Destination[];
 }) {
   return (
-    <span className="destination-cell">
+    <a
+      href={`#/destinations?destination_id=${encodeURIComponent(id)}`}
+      className="destination-cell"
+    >
       <span className="endpoint-icon">
         <Icon name="destinations" size={15} />
       </span>
       {destinationName(id, destinations)}
-    </span>
+    </a>
   );
 }
 function DeliveryTable({
@@ -99,7 +111,10 @@ function DeliveryTable({
       header: 'Delivery',
       width: '190px',
       cell: (item) => (
-        <a href={`#/deliveries/${item.id}`} className="record-link mono">
+        <a
+          href={detailLink(`/deliveries/${item.id}`)}
+          className="record-link mono"
+        >
           {shortID(item.id)}
           <span className="record-subtitle">
             {item.replay_of ? 'Replay' : `Event ${shortID(item.event_id)}`}
@@ -152,7 +167,7 @@ function DeliveryTable({
       width: '64px',
       cell: (item) => (
         <a
-          href={`#/deliveries/${item.id}`}
+          href={detailLink(`/deliveries/${item.id}`)}
           className="row-arrow"
           aria-label={`Inspect delivery ${shortID(item.id)}`}
         >
@@ -209,13 +224,19 @@ export function Dashboard() {
       {s && (
         <>
           <div className="metrics-grid">
-            <Metric label="Total events" value={s.events} icon="events" />
+            <Metric
+              label="Retained events"
+              value={s.events}
+              icon="events"
+              href="#/events"
+            />
             <Metric
               label="Delivered"
+              href="#/deliveries?status=succeeded"
               value={s.succeeded}
               detail={
                 settled
-                  ? `${((s.succeeded / settled) * 100).toFixed(1)}% of completed deliveries`
+                  ? `${((s.succeeded / settled) * 100).toFixed(1)}% of delivered + failed records`
                   : undefined
               }
               icon="check"
@@ -223,16 +244,40 @@ export function Dashboard() {
             />
             <Metric
               label="In progress"
+              href="#/deliveries?status=active"
               value={s.pending + s.delivering + s.retrying}
-              detail={`${number.format(s.retrying)} scheduled for retry`}
+              detail={`${number.format(s.paused)} paused · ${number.format(s.eligible)} eligible · ${number.format(s.scheduled)} scheduled`}
               icon="deliveries"
             />
             <Metric
-              label="Failed"
+              label="Historical failures"
+              href="#/deliveries?status=dead"
               value={s.dead}
               icon="refresh"
               warning={s.dead > 0}
             />
+          </div>
+          <div className="info-note overview-scope">
+            <p>
+              Retained delivery history across all retained time, including
+              replays. The success rate is delivered / (delivered + failed);
+              canceled and active deliveries are excluded. Successful replay
+              recovery does not erase an earlier failure. Retention can reduce
+              these counts and change the rate.
+            </p>
+            <p>
+              Oldest eligible queued work:{' '}
+              <strong>
+                {s.eligible
+                  ? `${number.format(s.oldest_eligible_queued_age_seconds)} seconds past its due time`
+                  : 'None'}
+              </strong>
+              . Paused work is excluded.{' '}
+              <a className="text-link" href="#/deliveries?status=canceled">
+                {number.format(s.canceled)} canceled deliveries
+              </a>
+              .
+            </p>
           </div>
         </>
       )}
@@ -274,6 +319,7 @@ export function Dashboard() {
   );
 }
 function Metric({
+  href,
   label,
   value,
   detail,
@@ -281,6 +327,7 @@ function Metric({
   good = false,
   warning = false,
 }: {
+  href: string;
   label: string;
   value: number;
   detail?: string;
@@ -289,7 +336,8 @@ function Metric({
   warning?: boolean;
 }) {
   return (
-    <section
+    <a
+      href={href}
       className={`metric ${good ? 'metric-good' : ''} ${warning ? 'metric-warning' : ''}`}
     >
       <div className="metric-label">
@@ -298,14 +346,19 @@ function Metric({
       </div>
       <strong>{number.format(value)}</strong>
       {detail && <p>{detail}</p>}
-    </section>
+    </a>
   );
 }
 export function Destinations({ notify }: Notice) {
-  const [history, setHistory] = useState(['']);
+  const { params, history, setHistory } = useListRoute('/destinations');
+  const selectedID = params.get('destination_id');
   const query = useQuery(
-    `/destinations${queryString({ limit: '25', before: history.at(-1) ?? '' })}`,
-    page(destination),
+    selectedID
+      ? `/destinations/${encodeURIComponent(selectedID)}`
+      : `/destinations${queryString({ limit: '25', before: history.at(-1) ?? '' })}`,
+    selectedID
+      ? (value) => ({ items: [destination(value)], next_cursor: null })
+      : page(destination),
   );
   const [form, setForm] = useState<Destination | 'new' | null>(() =>
     window.location.hash.includes('create=true') ? 'new' : null,
@@ -314,12 +367,10 @@ export function Destinations({ notify }: Notice) {
   const mutation = useMutation();
   async function toggle(item: Destination) {
     const result = await mutation.run((signal) =>
-      request(`/destinations/${item.id}`, destination, {
-        method: 'PUT',
+      request(`/destinations/${item.id}/enabled`, destination, {
+        method: 'PATCH',
         signal,
         body: JSON.stringify({
-          name: item.name,
-          url: item.url,
           enabled: !item.enabled,
         }),
       }),
@@ -346,6 +397,11 @@ export function Destinations({ notify }: Notice) {
   }
   return (
     <>
+      {selectedID && (
+        <a className="back-link" href="#/destinations">
+          ← All destinations
+        </a>
+      )}
       <PageHeader
         title="Destinations"
         actions={
@@ -392,14 +448,29 @@ export function Destinations({ notify }: Notice) {
           />
         )}
       </Panel>
+      {selectedID &&
+        query.data?.items[0] &&
+        (query.data.items[0].archived ? (
+          <p className="info-note">
+            This destination is archived. New events and replays are
+            unavailable; its history remains available.
+          </p>
+        ) : (
+          <IntegrationExample item={query.data.items[0]} />
+        ))}
       {form && (
         <DestinationForm
           initial={form === 'new' ? undefined : form}
           onClose={() => setForm(null)}
           onSaved={(item) => {
+            const created = form === 'new';
             setForm(null);
             notify(`Destination “${item.name}” saved.`);
-            query.refresh();
+            if (created)
+              navigate(
+                `/destinations?destination_id=${encodeURIComponent(item.id)}`,
+              );
+            else query.refresh();
           }}
         />
       )}
@@ -443,6 +514,14 @@ function DestinationTable({
             <span className="endpoint-url" title={safeURL(item.url)}>
               {safeURL(item.url)}
             </span>
+            <span className="record-subtitle mono">{item.id}</span>
+            <CopyButton text={item.id} label="Copy ID" />
+            <a
+              className="text-link"
+              href={`#/guide?destination_id=${encodeURIComponent(item.id)}`}
+            >
+              Integration example
+            </a>
           </div>
         </div>
       ),
@@ -505,25 +584,17 @@ function DestinationTable({
       data={items}
       columns={columns}
       getRowId={(item) => item.id}
-      rowHeight={64}
+      rowHeight={116}
       virtualized={false}
-      height={Math.min((items.length + 1) * 64, 640)}
+      height={Math.min((items.length + 1) * 116, 640)}
     />
   );
 }
 export function Deliveries() {
-  const [eventID, setEventID] = useState(
-    () =>
-      new URLSearchParams(window.location.hash.split('?')[1]).get('event_id') ??
-      '',
-  );
-  const [status, setStatus] = useState(
-    () =>
-      new URLSearchParams(window.location.hash.split('?')[1]).get('status') ??
-      '',
-  );
-  const [destinationID, setDestinationID] = useState('');
-  const [history, setHistory] = useState(['']);
+  const { params, history, update, setHistory } = useListRoute('/deliveries');
+  const eventID = params.get('event_id') ?? '';
+  const status = params.get('status') ?? '';
+  const destinationID = params.get('destination_id') ?? '';
   const index = useDestinationIndex();
   const query = useQuery(
     `/deliveries${queryString({ limit: '25', status, event_id: eventID, destination_id: destinationID, before: history.at(-1) ?? '' })}`,
@@ -536,6 +607,7 @@ export function Deliveries() {
         actions={<Refresh onClick={query.refresh} />}
       />
       <ErrorBox message={query.error || index.error} retry={query.refresh} />
+      <RecordLookup />
       <Panel>
         <div className="filter-bar">
           <div className="filter-field">
@@ -545,11 +617,11 @@ export function Deliveries() {
               aria-label="Status"
               value={status}
               onValueChange={(value) => {
-                setStatus(value);
-                setHistory(['']);
+                update({ status: value });
               }}
               options={[
                 { value: '', label: 'All statuses' },
+                { value: 'active', label: 'In progress' },
                 ...statuses.map((value) => ({
                   value,
                   label: knownStatusLabels[value],
@@ -561,8 +633,7 @@ export function Deliveries() {
             value={destinationID}
             items={index.destinations}
             onChange={(value) => {
-              setDestinationID(value);
-              setHistory(['']);
+              update({ destination_id: value });
             }}
           />
           {eventID && (
@@ -572,10 +643,7 @@ export function Deliveries() {
             <Button
               className="button small"
               onClick={() => {
-                setStatus('');
-                setEventID('');
-                setDestinationID('');
-                setHistory(['']);
+                update({ status: '', event_id: '', destination_id: '' });
               }}
             >
               Clear filters
@@ -636,10 +704,10 @@ function DestinationFilter({
   );
 }
 export function Events({ notify }: Notice) {
-  const [destinationID, setDestinationID] = useState('');
-  const [typeInput, setTypeInput] = useState('');
-  const [type, setType] = useState('');
-  const [history, setHistory] = useState(['']);
+  const { params, history, update, setHistory } = useListRoute('/events');
+  const destinationID = params.get('destination_id') ?? '';
+  const type = params.get('type') ?? '';
+  const [typeInput, setTypeInput] = useState(type);
   const [compose, setCompose] = useState(() =>
     window.location.hash.includes('compose=true'),
   );
@@ -650,8 +718,7 @@ export function Events({ notify }: Notice) {
   );
   function filter(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    setType(typeInput.trim());
-    setHistory(['']);
+    update({ type: typeInput.trim() });
   }
   return (
     <>
@@ -668,6 +735,7 @@ export function Events({ notify }: Notice) {
         }
       />
       <ErrorBox message={query.error || index.error} retry={query.refresh} />
+      <RecordLookup />
       <Panel>
         <div className="filter-bar">
           <form className="type-filter" onSubmit={filter}>
@@ -689,18 +757,14 @@ export function Events({ notify }: Notice) {
             value={destinationID}
             items={index.destinations}
             onChange={(value) => {
-              setDestinationID(value);
-              setHistory(['']);
+              update({ destination_id: value });
             }}
           />
           {(type || destinationID) && (
             <Button
               className="button small"
               onClick={() => {
-                setType('');
-                setTypeInput('');
-                setDestinationID('');
-                setHistory(['']);
+                update({ type: '', destination_id: '' });
               }}
             >
               Clear filters
@@ -762,7 +826,7 @@ function EventTable({
       header: 'Event',
       width: '230px',
       cell: (item) => (
-        <a href={`#/events/${item.id}`} className="record-link">
+        <a href={detailLink(`/events/${item.id}`)} className="record-link">
           {item.type}
           <span className="record-subtitle mono">{shortID(item.id)}</span>
         </a>
@@ -802,7 +866,7 @@ function EventTable({
       cell: (item) => (
         <a
           className="row-arrow"
-          href={`#/events/${item.id}`}
+          href={detailLink(`/events/${item.id}`)}
           aria-label={`Inspect event ${shortID(item.id)}`}
         >
           <Icon name="arrow" size={17} />
@@ -848,8 +912,8 @@ export function EventView({ id, notify }: { id: string } & Notice) {
   }
   return (
     <>
-      <a className="back-link" href="#/events">
-        ← All events
+      <a className="back-link" href={`#${returnRoute('/events')}`}>
+        ← Back to results
       </a>
       <PageHeader
         title={data?.event.type ?? 'Event'}
@@ -859,6 +923,7 @@ export function EventView({ id, notify }: { id: string } & Notice) {
       {query.loading && <Loading />}
       {data && (
         <>
+          {data.recovered_by && <RecoveryLink id={data.recovered_by} />}
           <Panel
             title="Event metadata"
             action={
@@ -954,7 +1019,6 @@ export function DeliveryView({ id, notify }: { id: string } & Notice) {
     `/deliveries/${encodeURIComponent(id)}`,
     deliveryDetail,
   );
-  const index = useDestinationIndex();
   const [action, setAction] = useState<'replay' | 'cancel' | null>(null);
   const mutation = useMutation();
   const replayKey = useStableKey();
@@ -974,7 +1038,12 @@ export function DeliveryView({ id, notify }: { id: string } & Notice) {
             ? 'Replay already queued. Opened the existing delivery.'
             : 'Replay queued as a new delivery.',
         );
-        navigate(`/deliveries/${result.delivery.id}`);
+        navigate(
+          detailLink(
+            `/deliveries/${result.delivery.id}`,
+            returnRoute('/deliveries'),
+          ).slice(1),
+        );
         setAction(null);
       }
     } else {
@@ -995,18 +1064,22 @@ export function DeliveryView({ id, notify }: { id: string } & Notice) {
   }
   return (
     <>
-      <a className="back-link" href="#/deliveries">
-        ← All deliveries
+      <a className="back-link" href={`#${returnRoute('/deliveries')}`}>
+        ← Back to results
       </a>
       <PageHeader
         title={`Delivery ${shortID(id)}`}
         actions={
           <>
             <Refresh onClick={query.refresh} />
-            {data && terminal(data.delivery.status) && (
+            {data && (
               <Button
                 className="button primary"
                 onClick={() => setAction('replay')}
+                disabled={!data.replay.eligible}
+                aria-describedby={
+                  !data.replay.eligible ? 'replay-unavailable' : undefined
+                }
               >
                 <Icon name="refresh" size={16} />
                 Replay delivery
@@ -1027,6 +1100,12 @@ export function DeliveryView({ id, notify }: { id: string } & Notice) {
       {query.loading && <Loading />}
       {data && (
         <>
+          {!data.replay.eligible && (
+            <p id="replay-unavailable" className="info-note">
+              {replayExplanation(data.replay.reason)}
+            </p>
+          )}
+          {data.recovered_by && <RecoveryLink id={data.recovered_by} />}
           <Panel
             title="Delivery summary"
             action={<Badge status={data.delivery.status} />}
@@ -1040,7 +1119,7 @@ export function DeliveryView({ id, notify }: { id: string } & Notice) {
                 <dt>Event</dt>
                 <dd>
                   <a
-                    href={`#/events/${data.delivery.event_id}`}
+                    href={detailLink(`/events/${data.delivery.event_id}`)}
                     className="mono text-link"
                   >
                     {shortID(data.delivery.event_id)}
@@ -1051,15 +1130,24 @@ export function DeliveryView({ id, notify }: { id: string } & Notice) {
               <div>
                 <dt>Destination</dt>
                 <dd>
-                  {destinationName(
-                    data.delivery.destination_id,
-                    index.destinations,
-                  )}
+                  <a
+                    className="text-link"
+                    href={`#/destinations?destination_id=${encodeURIComponent(data.destination.id)}`}
+                  >
+                    {data.destination.name} ·{' '}
+                    {data.destination.archived
+                      ? 'Archived'
+                      : data.destination.enabled
+                        ? 'Active'
+                        : 'Paused'}
+                  </a>
                 </dd>
               </div>
               <div>
                 <dt>Attempts</dt>
-                <dd>{data.delivery.attempt_count}</dd>
+                <dd>
+                  {data.delivery.attempt_count} of {data.max_attempts}
+                </dd>
               </div>
               <div>
                 <dt>Created</dt>
@@ -1073,8 +1161,12 @@ export function DeliveryView({ id, notify }: { id: string } & Notice) {
                   <DateValue value={data.delivery.updated_at} />
                 </dd>
               </div>
+              <div className="detail-wide">
+                <dt>Scheduling state</dt>
+                <dd>{schedulingLabel(data.scheduling_state)}</dd>
+              </div>
               <div>
-                <dt>Next attempt</dt>
+                <dt>Scheduled due time</dt>
                 <dd>
                   <DateValue value={data.delivery.next_attempt_at} />
                 </dd>
@@ -1093,7 +1185,9 @@ export function DeliveryView({ id, notify }: { id: string } & Notice) {
                   <dd>
                     <a
                       className="text-link mono"
-                      href={`#/deliveries/${data.delivery.replay_of}`}
+                      href={detailLink(
+                        `/deliveries/${data.delivery.replay_of}`,
+                      )}
                     >
                       {shortID(data.delivery.replay_of)}
                       <Icon name="arrow" size={15} />
@@ -1102,6 +1196,13 @@ export function DeliveryView({ id, notify }: { id: string } & Notice) {
                 </div>
               )}
             </dl>
+            {data.delivery.status === 'dead' &&
+              data.delivery.attempt_count >= data.max_attempts && (
+                <p className="delivery-note">
+                  This delivery has used its current attempt budget. Resolve the
+                  failure before replaying with a fresh budget.
+                </p>
+              )}
             {data.delivery.last_error && (
               <div className="delivery-note">
                 {failureLabel(data.delivery.last_error)}
@@ -1113,7 +1214,7 @@ export function DeliveryView({ id, notify }: { id: string } & Notice) {
               <Empty title="Waiting for the first attempt">
                 {data.delivery.status === 'canceled'
                   ? 'This delivery was canceled before an attempt completed.'
-                  : 'The worker will attempt this delivery when its destination is enabled and it becomes due.'}
+                  : schedulingLabel(data.scheduling_state)}
               </Empty>
             ) : (
               <ol className="timeline">
@@ -1143,6 +1244,11 @@ export function DeliveryView({ id, notify }: { id: string } & Notice) {
                       {item.error_code && (
                         <p>{failureLabel(item.error_code)}</p>
                       )}
+                      <p>
+                        Destination revision:{' '}
+                        {item.destination_revision ??
+                          'Unknown (recorded before revision tracking)'}
+                      </p>
                       <span className="attempt-time">
                         <DateValue value={item.started_at} />
                       </span>
@@ -1182,7 +1288,20 @@ function failureLabel(code: string): string {
     timeout: 'The endpoint did not respond before the delivery timeout.',
     request_timeout:
       'The endpoint did not respond before the delivery timeout.',
-    network_error: 'A network error prevented delivery.',
+    network_error:
+      'A network error prevented delivery. Check the receiver availability and outbound network configuration.',
+    dns_error:
+      'The endpoint hostname could not be resolved. Check its DNS records and the server resolver.',
+    tls_error:
+      'TLS verification or the secure handshake failed. Check the receiver certificate, hostname and TLS configuration.',
+    destination_blocked:
+      'The endpoint is blocked by the outbound network policy. Review its address and the server allowlist.',
+    attempts_exhausted:
+      'The delivery exhausted its attempt budget. Fix the receiver before replaying with a new budget.',
+    secret_decryption_failed:
+      'The signing secret could not be decrypted. Check the installation encryption key or replace this destination’s secret.',
+    interrupted:
+      'The worker stopped before completing this attempt. Check subsequent attempts and the current schedule; the receiver may still have accepted the event.',
     connection_error: 'A connection to the endpoint could not be established.',
     http_error: 'The endpoint returned an unsuccessful HTTP response.',
     http_status: 'The endpoint returned an unsuccessful HTTP response.',
@@ -1198,17 +1317,191 @@ function failureLabel(code: string): string {
     'The attempt could not complete successfully. Check the endpoint and its delivery configuration.'
   );
 }
-export function Guide() {
-  const [copied, setCopied] = useState(false);
-  const snippet = `curl --request POST "$HOOKLANE_URL/api/v1/events" \\\n  --header "Authorization: Bearer $HOOKLANE_INGEST_TOKEN" \\\n  --header "Idempotency-Key: $(uuidgen)" \\\n  --header "Content-Type: application/json" \\\n  --data '{\n    "destination_id": "YOUR_DESTINATION_ID",\n    "type": "invoice.paid",\n    "payload": { "invoice_id": "inv_123" }\n  }'`;
+function RecordLookup() {
+  const [id, setID] = useState('');
+  const [kind, setKind] = useState('deliveries');
+  function open(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (id.trim())
+      navigate(
+        detailLink(`/${kind}/${encodeURIComponent(id.trim())}`).slice(1),
+      );
+  }
+  return (
+    <form className="filter-bar record-lookup" onSubmit={open}>
+      <div className="filter-field">
+        <label htmlFor="lookup-kind">Record</label>
+        <SelectField
+          id="lookup-kind"
+          value={kind}
+          onValueChange={setKind}
+          options={[
+            { value: 'deliveries', label: 'Delivery ID' },
+            { value: 'events', label: 'Event ID' },
+          ]}
+        />
+      </div>
+      <div className="filter-field">
+        <label htmlFor="lookup-id">Full record ID</label>
+        <Input
+          id="lookup-id"
+          value={id}
+          onChange={setID}
+          required
+          maxLength={128}
+          placeholder="Paste an event or delivery ID"
+        />
+      </div>
+      <Button type="submit" className="button">
+        Open record
+      </Button>
+    </form>
+  );
+}
+function RecoveryLink({ id }: { id: string }) {
+  return (
+    <p className="info-note">
+      Recovered by replay. The original delivery and attempts remain in history.{' '}
+      <a className="text-link" href={detailLink(`/deliveries/${id}`)}>
+        View successful replay <Icon name="arrow" size={15} />
+      </a>
+    </p>
+  );
+}
+function replayExplanation(reason: ReplayReason): string {
+  switch (reason) {
+    case 'payload_redacted':
+      return 'Replay unavailable: the payload was permanently redacted.';
+    case 'destination_archived':
+      return 'Replay unavailable: the destination is archived. Existing history is preserved.';
+    case 'delivery_not_terminal':
+      return 'Replay is available after this delivery finishes. Refresh to check its current state.';
+    default:
+      return 'Replay is currently unavailable. Refresh to check its current state.';
+  }
+}
+function schedulingLabel(state: SchedulingState): string {
+  const labels: Record<SchedulingState, string> = {
+    terminal: 'Finished. No more attempts are scheduled for this delivery.',
+    delivering:
+      'A worker has claimed this delivery. A request may be in flight.',
+    destination_archived:
+      'The destination is archived; no new attempts can start.',
+    waiting_for_resume:
+      'Waiting for destination resume. The worker cannot claim this delivery while its destination is paused.',
+    attempts_exhausted:
+      'Attempt budget exhausted. No further automatic attempts are available.',
+    payload_redacted:
+      'The payload has been redacted; no new attempts can start.',
+    scheduled:
+      'Waiting for its scheduled due time before a worker can claim it.',
+    unscheduled:
+      'No attempt scheduled. Refresh and check the service if this persists.',
+    eligible:
+      'Due and eligible for a worker. Actual start depends on worker availability.',
+  };
+  return labels[state];
+}
+function CopyButton({ text, label }: { text: string; label: string }) {
+  const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
   async function copy() {
     try {
-      await navigator.clipboard.writeText(snippet);
-      setCopied(true);
+      await navigator.clipboard.writeText(text);
+      setState('copied');
     } catch {
-      setCopied(false);
+      setState('failed');
     }
   }
+  return (
+    <>
+      <Button className="button small" onClick={() => void copy()}>
+        {state === 'copied' ? 'Copied' : label}
+      </Button>
+      {state === 'failed' && (
+        <span role="status" className="field-hint">
+          Clipboard unavailable. Select and copy the text above.
+        </span>
+      )}
+    </>
+  );
+}
+const repositoryURL = 'https://github.com/gregorsternat/hooklane/blob/main';
+function shellQuote(value: string) {
+  return `'${value.replaceAll("'", "'\"'\"'")}'`;
+}
+function IntegrationExample({ item }: { item?: Destination }) {
+  const [key] = useState(() => crypto.randomUUID());
+  const setup = `HOOKLANE_URL=${shellQuote(window.location.origin)}
+HOOKLANE_INGEST_TOKEN='<INGEST_TOKEN>'
+IDEMPOTENCY_KEY=${shellQuote(key)}`;
+  const body = JSON.stringify(
+    {
+      destination_id: item?.id ?? 'YOUR_DESTINATION_ID',
+      type: 'invoice.paid',
+      payload: { invoice_id: 'inv_123' },
+    },
+    null,
+    2,
+  );
+  const snippet = `curl --request POST "$HOOKLANE_URL/api/v1/events" \\
+  --header "Authorization: Bearer $HOOKLANE_INGEST_TOKEN" \\
+  --header "Idempotency-Key: $IDEMPOTENCY_KEY" \\
+  --header "Content-Type: application/json" \\
+  --data ${shellQuote(body)}`;
+  return (
+    <Panel title={item ? `Send a test event to ${item.name}` : 'Send an event'}>
+      <div className="prose">
+        {item && (
+          <p>
+            Destination ID: <code>{item.id}</code>{' '}
+            <CopyButton text={item.id} label="Copy destination ID" />
+          </p>
+        )}
+        <p>
+          Run this setup once for this event. Replace the token placeholder with
+          your installation’s ingestion token. The instance URL is taken from
+          this console.
+        </p>
+        <pre className="code-block">
+          <code>{setup}</code>
+        </pre>
+        <CopyButton text={setup} label="Copy setup" />
+        <p>
+          Run the request below. For retries, repeat this same request with the
+          same variables and exact content. A different event requires a new
+          idempotency key.
+        </p>
+        <pre className="code-block">
+          <code>{snippet}</code>
+        </pre>
+        <CopyButton text={snippet} label="Copy request" />
+        <p>
+          Accepted events return <code>202</code>; exact duplicates return{' '}
+          <code>200</code>. Find the returned delivery ID using{' '}
+          <a className="text-link" href="#/deliveries">
+            delivery lookup
+          </a>
+          , or{' '}
+          <a className="text-link" href="#/events?compose=true">
+            send a test from the event composer
+          </a>
+          .
+        </p>
+        {item && !item.enabled && (
+          <p className="info-note">
+            This destination is paused. Events can be accepted, but delivery
+            waits until you resume it.
+          </p>
+        )}
+      </div>
+    </Panel>
+  );
+}
+export function Guide() {
+  const index = useDestinationIndex();
+  const { params, update } = useListRoute('/guide');
+  const selectedID = params.get('destination_id') ?? '';
+  const selected = index.destinations.find((item) => item.id === selectedID);
   return (
     <>
       <PageHeader title="Integration guide" />
@@ -1218,74 +1511,87 @@ export function Guide() {
             <div className="prose">
               <p>
                 Create a destination with a name, an HTTPS endpoint URL, and a
-                signing secret of at least 32 characters. Keep the same secret
-                in your receiving application.
+                signing secret of at least 32 bytes. Keep the same secret in
+                your receiving application. Secrets cannot be retrieved from
+                this console.
               </p>
               <p>
-                The receiver must respond with a <code>2xx</code> status after
-                accepting an event. Use a fast handler and process longer tasks
-                asynchronously.
+                Start with the{' '}
+                <a
+                  className="text-link"
+                  href={`${repositoryURL}/examples/receiver/README.md`}
+                >
+                  signature-verifying receiver example
+                </a>{' '}
+                and follow the{' '}
+                <a
+                  className="text-link"
+                  href={`${repositoryURL}/docs/api.md#receiving-and-verifying`}
+                >
+                  signing protocol
+                </a>
+                . Verify the exact bytes and timestamp before accepting the
+                event; respond with a <code>2xx</code> status.
               </p>
               <a href="#/destinations?create=true" className="text-link">
-                Create a destination
-                <Icon name="arrow" size={16} />
+                Create a destination <Icon name="arrow" size={16} />
               </a>
             </div>
           </Panel>
-          <Panel
-            title="Send an event"
-            action={
-              <Button className="button small" onClick={() => void copy()}>
-                {copied ? 'Copied' : 'Copy example'}
-              </Button>
-            }
-          >
+          <Panel title="Choose a destination">
             <div className="prose">
-              <p>
-                Set <code>HOOKLANE_URL</code> to your instance URL and{' '}
-                <code>HOOKLANE_INGEST_TOKEN</code> to its ingestion token.
-              </p>
-              <pre className="code-block">
-                <code>{snippet}</code>
-              </pre>
-              <p>
-                <strong>
-                  Reuse the same idempotency key when retrying an API request.
-                </strong>{' '}
-                The server returns the existing event and delivery for a
-                matching request. A different event requires a new key.
-              </p>
-              <p>
-                Accepted events return <code>202</code>. Duplicate requests
-                return <code>200</code>.
-              </p>
-              <a href="#/events?compose=true" className="text-link">
-                Open event composer
-                <Icon name="arrow" size={16} />
-              </a>
+              <ErrorBox message={index.error} />
+              <DestinationFilter
+                value={selectedID}
+                items={index.destinations.filter((item) => !item.archived)}
+                onChange={(value) => update({ destination_id: value })}
+              />
+              {!selected && (
+                <p>Choose a destination to populate its ID in the request.</p>
+              )}
+              {selected?.archived && (
+                <p>
+                  This destination is archived. Choose an active or paused
+                  destination to send a new event.
+                </p>
+              )}
             </div>
           </Panel>
+          {selected && !selected.archived && (
+            <IntegrationExample key={selected.id} item={selected} />
+          )}
           <Panel title="Verify and deduplicate">
             <div className="prose">
               <p>
-                Verify every signature against the exact request bytes before
-                decoding JSON. Check the signed timestamp to prevent old
-                requests being reused.
+                Deliveries are attempted at least once. Store processed
+                Webhook-Id values and acknowledge known duplicates with a
+                successful response. Replays keep the original Webhook-Id and
+                receive a new delivery ID.
               </p>
               <p>
-                Deliveries are attempted at least once. Store processed event
-                IDs and acknowledge known duplicates with a successful response.
-                Replays keep the original event ID and receive a new delivery
-                ID.
+                Use the{' '}
+                <a
+                  className="text-link"
+                  href={`${repositoryURL}/docs/api.md#receiving-and-verifying`}
+                >
+                  signature protocol
+                </a>{' '}
+                and{' '}
+                <a
+                  className="text-link"
+                  href={`${repositoryURL}/examples/receiver/README.md`}
+                >
+                  receiver example
+                </a>{' '}
+                to verify signed test deliveries. The{' '}
+                <a
+                  className="text-link"
+                  href={`${repositoryURL}/docs/operations.md`}
+                >
+                  operations guide
+                </a>{' '}
+                describes retry limits, network allowlists and retention.
               </p>
-              <p>
-                See the repository API documentation for signature headers,
-                retry limits, network allowlists, and retention settings.
-              </p>
-              <a href="#/deliveries" className="text-link">
-                View deliveries
-                <Icon name="arrow" size={16} />
-              </a>
             </div>
           </Panel>
         </div>
