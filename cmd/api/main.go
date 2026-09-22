@@ -46,7 +46,7 @@ func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 		return errors.New("could not initialize database pool")
 	}
 	defer pool.Close()
-	state, err := store.New(pool, cfg.EncryptionKey)
+	state, err := store.New(pool, cfg.EncryptionKey, cfg.MaxAttempts)
 	if err != nil {
 		return errors.New("could not initialize encrypted storage")
 	}

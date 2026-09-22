@@ -17,14 +17,18 @@ import (
 
 // Store owns encrypted signing material and PostgreSQL delivery state.
 type Store struct {
-	pool    *pgxpool.Pool
-	queries *storedb.Queries
-	cipher  cipher.AEAD
+	pool        *pgxpool.Pool
+	queries     *storedb.Queries
+	cipher      cipher.AEAD
+	maxAttempts int
 }
 
-func New(pool *pgxpool.Pool, key []byte) (*Store, error) {
+func New(pool *pgxpool.Pool, key []byte, maxAttempts int) (*Store, error) {
 	if pool == nil {
 		return nil, errors.New("database pool is required")
+	}
+	if maxAttempts < 1 {
+		return nil, errors.New("positive attempt limit is required")
 	}
 	if len(key) != 32 {
 		return nil, errors.New("encryption key must contain exactly 32 bytes")
@@ -37,7 +41,7 @@ func New(pool *pgxpool.Pool, key []byte) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("initialize encryption: %w", err)
 	}
-	return &Store{pool: pool, queries: storedb.New(pool), cipher: aead}, nil
+	return &Store{pool: pool, queries: storedb.New(pool), cipher: aead, maxAttempts: maxAttempts}, nil
 }
 
 func newID(prefix string) string {
@@ -78,13 +82,13 @@ func rollback(ctx context.Context, tx pgx.Tx) { _ = tx.Rollback(ctx) }
 
 type scanner interface{ Scan(...any) error }
 
-const destinationColumns = `id,name,url,enabled,archived,created_at,updated_at`
+const destinationColumns = `id,name,url,enabled,archived,created_at,updated_at,revision`
 const deliveryColumns = `id,event_id,destination_id,COALESCE(replay_of,''),status,attempt_count,next_attempt_at,last_status_code,last_error,created_at,updated_at`
 const eventColumns = `id,destination_id,event_type,payload_bytes,payload_sha256,payload IS NULL,created_at`
 
 func scanDestination(row scanner) (Destination, error) {
 	var d Destination
-	err := row.Scan(&d.ID, &d.Name, &d.URL, &d.Enabled, &d.Archived, &d.CreatedAt, &d.UpdatedAt)
+	err := row.Scan(&d.ID, &d.Name, &d.URL, &d.Enabled, &d.Archived, &d.CreatedAt, &d.UpdatedAt, &d.Revision)
 	return d, normalizeError(err)
 }
 func scanDelivery(row scanner) (Delivery, error) {
@@ -110,10 +114,30 @@ func (s *Store) UpdateDestination(ctx context.Context, id string, in Destination
 	if in.SigningSecret != "" {
 		secret = s.encrypt(id, in.SigningSecret)
 	}
-	d, err := scanDestination(s.pool.QueryRow(ctx, `UPDATE destinations SET name=$2,url=$3,secret_cipher=COALESCE($4,secret_cipher),enabled=$5,updated_at=now() WHERE id=$1 AND NOT archived RETURNING `+destinationColumns, id, in.Name, in.URL, secret, in.Enabled))
+	// A conditional update serializes concurrent editors without holding a lock
+	// during URL validation at the HTTP boundary.
+	d, err := scanDestination(s.pool.QueryRow(ctx, `UPDATE destinations SET name=$2,url=$3,secret_cipher=COALESCE($4,secret_cipher),enabled=$5,updated_at=now(),revision=revision+1 WHERE id=$1 AND NOT archived AND revision=$6 RETURNING `+destinationColumns, id, in.Name, in.URL, secret, in.Enabled, in.Revision))
 	if errors.Is(err, ErrNotFound) {
 		existing, e := s.GetDestination(ctx, id)
-		if e == nil && existing.Archived {
+		if e != nil {
+			return Destination{}, e
+		}
+		if existing.Archived {
+			return Destination{}, ErrUnavailable
+		}
+		return Destination{}, ErrDestinationConflict
+	}
+	return d, err
+}
+
+func (s *Store) SetDestinationEnabled(ctx context.Context, id string, enabled bool) (Destination, error) {
+	d, err := scanDestination(s.pool.QueryRow(ctx, `UPDATE destinations SET enabled=$2,updated_at=now(),revision=revision+1 WHERE id=$1 AND NOT archived RETURNING `+destinationColumns, id, enabled))
+	if errors.Is(err, ErrNotFound) {
+		existing, e := s.GetDestination(ctx, id)
+		if e != nil {
+			return Destination{}, e
+		}
+		if existing.Archived {
 			return Destination{}, ErrUnavailable
 		}
 	}
@@ -125,7 +149,7 @@ func (s *Store) ArchiveDestination(ctx context.Context, id string) error {
 		return err
 	}
 	defer rollback(ctx, tx)
-	tag, err := tx.Exec(ctx, `UPDATE destinations SET archived=true,enabled=false,updated_at=now() WHERE id=$1`, id)
+	tag, err := tx.Exec(ctx, `UPDATE destinations SET archived=true,enabled=false,updated_at=now(),revision=revision+1 WHERE id=$1`, id)
 	if err != nil {
 		return err
 	}

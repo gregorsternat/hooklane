@@ -31,6 +31,7 @@ type Options struct {
 type backend interface {
 	CreateDestination(context.Context, store.DestinationInput) (store.Destination, error)
 	UpdateDestination(context.Context, string, store.DestinationInput) (store.Destination, error)
+	SetDestinationEnabled(context.Context, string, bool) (store.Destination, error)
 	ArchiveDestination(context.Context, string) error
 	GetDestination(context.Context, string) (store.Destination, error)
 	ListDestinations(context.Context, store.Page) ([]store.Destination, error)
@@ -79,6 +80,7 @@ func newAPIHandler(ping func(context.Context) error, readinessTimeout time.Durat
 		{"GET /api/v1/destinations", false, a.listDestinations},
 		{"GET /api/v1/destinations/{id}", false, a.getDestination},
 		{"PUT /api/v1/destinations/{id}", false, a.updateDestination},
+		{"PATCH /api/v1/destinations/{id}/enabled", false, a.setDestinationEnabled},
 		{"DELETE /api/v1/destinations/{id}", false, a.archiveDestination},
 		{"POST /api/v1/events", true, a.ingest},
 		{"GET /api/v1/events", false, a.listEvents},
@@ -142,6 +144,12 @@ func storeError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		apiError(w, http.StatusNotFound, "not_found", "The requested resource was not found.")
+	case errors.Is(err, store.ErrDestinationConflict):
+		apiError(w, http.StatusPreconditionFailed, "destination_conflict", "The destination changed after you opened it. Reload the current configuration before saving your edits.")
+	case errors.Is(err, store.ErrPayloadRedacted):
+		apiError(w, http.StatusConflict, "payload_redacted", "The event payload was permanently redacted and cannot be replayed.")
+	case errors.Is(err, store.ErrDeliveryNotTerminal):
+		apiError(w, http.StatusConflict, "delivery_not_terminal", "This delivery is still active. Refresh to check its latest state before replaying.")
 	case errors.Is(err, store.ErrConflict):
 		apiError(w, http.StatusConflict, "conflict", "The request conflicts with existing data or the current resource state.")
 	case errors.Is(err, store.ErrUnavailable):
@@ -302,6 +310,7 @@ func (a *api) createDestination(w http.ResponseWriter, r *http.Request) {
 		storeError(w, err)
 		return
 	}
+	w.Header().Set("ETag", fmt.Sprintf(`"%d"`, destination.Revision))
 	w.Header().Set("Location", "/api/v1/destinations/"+destination.ID)
 	respond(w, http.StatusCreated, destination)
 }
@@ -311,20 +320,60 @@ func (a *api) updateDestination(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	value := r.Header.Get("If-Match")
+	if value == "" {
+		apiError(w, http.StatusPreconditionRequired, "precondition_required", "Send If-Match with the quoted revision from the destination you edited.")
+		return
+	}
+	revision, err := strconv.ParseInt(strings.Trim(value, `"`), 10, 64)
+	if err != nil || revision < 1 || value != fmt.Sprintf(`"%d"`, revision) {
+		apiError(w, http.StatusBadRequest, "invalid_precondition", "If-Match must contain one quoted positive destination revision.")
+		return
+	}
 	existing, err := a.store.GetDestination(r.Context(), id)
 	if err != nil {
 		storeError(w, err)
+		return
+	}
+	if existing.Revision != revision {
+		storeError(w, store.ErrDestinationConflict)
 		return
 	}
 	input, ok := a.destinationInput(w, r, &existing)
 	if !ok {
 		return
 	}
+	input.Revision = revision
 	destination, err := a.store.UpdateDestination(r.Context(), id, input)
 	if err != nil {
 		storeError(w, err)
 		return
 	}
+	w.Header().Set("ETag", fmt.Sprintf(`"%d"`, destination.Revision))
+	respond(w, http.StatusOK, destination)
+}
+
+func (a *api) setDestinationEnabled(w http.ResponseWriter, r *http.Request) {
+	id, ok := resourceID(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if !decodeJSON(w, r, 1024, &body) {
+		return
+	}
+	if body.Enabled == nil {
+		apiError(w, http.StatusBadRequest, "invalid_destination", "enabled must be a boolean.")
+		return
+	}
+	destination, err := a.store.SetDestinationEnabled(r.Context(), id, *body.Enabled)
+	if err != nil {
+		storeError(w, err)
+		return
+	}
+	w.Header().Set("ETag", fmt.Sprintf(`"%d"`, destination.Revision))
 	respond(w, http.StatusOK, destination)
 }
 
@@ -353,6 +402,7 @@ func (a *api) getDestination(w http.ResponseWriter, r *http.Request) {
 		storeError(w, err)
 		return
 	}
+	w.Header().Set("ETag", fmt.Sprintf(`"%d"`, destination.Revision))
 	respond(w, http.StatusOK, destination)
 }
 
@@ -486,9 +536,9 @@ func (a *api) listDeliveries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch filter.Status {
-	case "", "pending", "retrying", "delivering", "succeeded", "dead", "canceled":
+	case "", "active", "pending", "retrying", "delivering", "succeeded", "dead", "canceled":
 	default:
-		apiError(w, http.StatusBadRequest, "invalid_filter", "status must be pending, retrying, delivering, succeeded, dead, or canceled.")
+		apiError(w, http.StatusBadRequest, "invalid_filter", "status must be active, pending, retrying, delivering, succeeded, dead, or canceled.")
 		return
 	}
 	filter.Limit++
@@ -569,4 +619,5 @@ func (a *api) metrics(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	_, _ = fmt.Fprintf(w, "# HELP hooklane_destinations Configured destinations excluding archived destinations.\n# TYPE hooklane_destinations gauge\nhooklane_destinations %d\n# HELP hooklane_events Retained event metadata records.\n# TYPE hooklane_events gauge\nhooklane_events %d\n# HELP hooklane_deliveries Delivery records by current state.\n# TYPE hooklane_deliveries gauge\nhooklane_deliveries{status=\"pending\"} %d\nhooklane_deliveries{status=\"retrying\"} %d\nhooklane_deliveries{status=\"delivering\"} %d\nhooklane_deliveries{status=\"succeeded\"} %d\nhooklane_deliveries{status=\"dead\"} %d\nhooklane_deliveries{status=\"canceled\"} %d\n", stats.Destinations, stats.Events, stats.Pending, stats.Retrying, stats.Delivering, stats.Succeeded, stats.Dead, stats.Canceled)
+	_, _ = fmt.Fprintf(w, "# HELP hooklane_queued_deliveries Queued retained deliveries by scheduling state under the configured attempt budget.\n# TYPE hooklane_queued_deliveries gauge\nhooklane_queued_deliveries{state=\"paused\"} %d\nhooklane_queued_deliveries{state=\"eligible\"} %d\nhooklane_queued_deliveries{state=\"scheduled\"} %d\n# HELP hooklane_oldest_eligible_queued_age_seconds Time past due for the oldest worker-eligible queued delivery; zero when none.\n# TYPE hooklane_oldest_eligible_queued_age_seconds gauge\nhooklane_oldest_eligible_queued_age_seconds %g\n", stats.Paused, stats.Eligible, stats.Scheduled, stats.OldestEligibleQueuedAgeSeconds)
 }

@@ -45,7 +45,7 @@ func testStore(t *testing.T) *Store {
 	if err = Migrate(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
-	s, err := New(pool, bytes.Repeat([]byte{42}, 32))
+	s, err := New(pool, bytes.Repeat([]byte{42}, 32), 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,14 +102,14 @@ func TestEncryptionAndMigration(t *testing.T) {
 	if err := s.ValidateKey(ctx); err != nil {
 		t.Fatal(err)
 	}
-	wrong, err := New(s.pool, bytes.Repeat([]byte{43}, 32))
+	wrong, err := New(s.pool, bytes.Repeat([]byte{43}, 32), 3)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err = wrong.ValidateKey(ctx); err == nil {
 		t.Fatal("wrong encryption key accepted")
 	}
-	if _, err = s.UpdateDestination(ctx, d.ID, DestinationInput{Name: "Renamed", URL: d.URL, Enabled: true}); err != nil {
+	if _, err = s.UpdateDestination(ctx, d.ID, DestinationInput{Name: "Renamed", URL: d.URL, Enabled: true, Revision: d.Revision}); err != nil {
 		t.Fatal(err)
 	}
 	ingest(t, s, d.ID, "")
@@ -300,7 +300,7 @@ func TestReplayRedactionRetentionAndControls(t *testing.T) {
 	if _, _, err := s.Replay(ctx, r.Delivery.ID, "replay"); !errors.Is(err, ErrConflict) {
 		t.Fatal("active replay allowed", err)
 	}
-	if _, err := s.UpdateDestination(ctx, d.ID, DestinationInput{Name: d.Name, URL: d.URL, Enabled: true}); err != nil {
+	if _, err := s.UpdateDestination(ctx, d.ID, DestinationInput{Name: d.Name, URL: d.URL, Enabled: true, Revision: d.Revision}); err != nil {
 		t.Fatal(err)
 	}
 	original := claim(t, s, 3)
@@ -509,5 +509,188 @@ func TestIdempotencyResultsSurviveArchival(t *testing.T) {
 	}
 	if _, err = s.Ingest(ctx, IngestInput{DestinationID: d.ID, Type: "test.created", IdempotencyKey: "accepted", Payload: []byte(`{}`)}); !errors.Is(err, ErrConflict) {
 		t.Fatal("archived destination accepted mismatched idempotent content", err)
+	}
+}
+
+func TestDestinationRevisionPreventsLostUpdates(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	original := createDestination(t, s, true)
+	updated, err := s.UpdateDestination(ctx, original.ID, DestinationInput{Name: original.Name, URL: "https://example.com/new", Enabled: true, Revision: original.Revision})
+	if err != nil {
+		t.Fatal(err)
+	}
+	paused, err := s.SetDestinationEnabled(ctx, original.ID, false)
+	if err != nil || paused.URL != updated.URL || paused.Enabled || paused.Revision != updated.Revision+1 {
+		t.Fatalf("pause lost new configuration: %+v %v", paused, err)
+	}
+	if _, err = s.UpdateDestination(ctx, original.ID, DestinationInput{Name: "Stale", URL: original.URL, Enabled: true, Revision: original.Revision}); !errors.Is(err, ErrDestinationConflict) {
+		t.Fatalf("stale update: %v", err)
+	}
+	current, err := s.GetDestination(ctx, original.ID)
+	if err != nil || current != paused {
+		t.Fatalf("stale update mutated destination: %+v %v", current, err)
+	}
+	results := make(chan error, 2)
+	var wg sync.WaitGroup
+	for _, name := range []string{"First", "Second"} {
+		wg.Go(func() {
+			_, err := s.UpdateDestination(ctx, original.ID, DestinationInput{Name: name, URL: paused.URL, Enabled: false, Revision: paused.Revision})
+			results <- err
+		})
+	}
+	wg.Wait()
+	close(results)
+	successes, conflicts := 0, 0
+	for err := range results {
+		if err == nil {
+			successes++
+		} else if errors.Is(err, ErrDestinationConflict) {
+			conflicts++
+		} else {
+			t.Fatal(err)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("concurrent saves: success=%d conflict=%d", successes, conflicts)
+	}
+}
+
+func TestReplayEligibilityAndDescendantRecovery(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	dest := createDestination(t, s, true)
+	original := ingest(t, s, dest.ID, "lineage")
+	detail, err := s.GetDelivery(ctx, original.Delivery.ID)
+	if err != nil || detail.Replay.Eligible || detail.Replay.Reason == nil || *detail.Replay.Reason != "delivery_not_terminal" {
+		t.Fatalf("active eligibility: %+v %v", detail, err)
+	}
+	if _, _, err = s.Replay(ctx, original.Delivery.ID, "active"); !errors.Is(err, ErrDeliveryNotTerminal) {
+		t.Fatalf("active replay: %v", err)
+	}
+	finish(t, s, claim(t, s, 3), "succeeded")
+	failed, _, err := s.Replay(ctx, original.Delivery.ID, "failed-replay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	finish(t, s, claim(t, s, 3), "dead")
+	detail, err = s.GetDelivery(ctx, failed.ID)
+	if err != nil || detail.RecoveredBy != nil || !detail.Replay.Eligible {
+		t.Fatalf("older ancestor success is not recovery: %+v %v", detail, err)
+	}
+	intermediate, _, err := s.Replay(ctx, failed.ID, "intermediate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	finish(t, s, claim(t, s, 3), "dead")
+	recovered, _, err := s.Replay(ctx, intermediate.ID, "recovered")
+	if err != nil {
+		t.Fatal(err)
+	}
+	finish(t, s, claim(t, s, 3), "succeeded")
+	detail, err = s.GetDelivery(ctx, failed.ID)
+	if err != nil || detail.RecoveredBy == nil || *detail.RecoveredBy != recovered.ID || detail.Delivery.Status != "dead" || len(detail.Attempts) != 1 || detail.Attempts[0].Status != "dead" {
+		t.Fatalf("descendant recovery lost history: %+v %v", detail, err)
+	}
+	event, err := s.GetEvent(ctx, original.Event.ID)
+	if err != nil || event.RecoveredBy == nil || *event.RecoveredBy != recovered.ID {
+		t.Fatalf("event recovery: %+v %v", event, err)
+	}
+	if err = s.Redact(ctx, original.Event.ID); err != nil {
+		t.Fatal(err)
+	}
+	detail, err = s.GetDelivery(ctx, failed.ID)
+	if err != nil || detail.Replay.Eligible || detail.Replay.Reason == nil || *detail.Replay.Reason != "payload_redacted" {
+		t.Fatalf("redacted eligibility: %+v %v", detail, err)
+	}
+	if _, _, err = s.Replay(ctx, failed.ID, "redacted"); !errors.Is(err, ErrPayloadRedacted) {
+		t.Fatalf("redacted replay: %v", err)
+	}
+	if err = s.ArchiveDestination(ctx, dest.ID); err != nil {
+		t.Fatal(err)
+	}
+	detail, err = s.GetDelivery(ctx, failed.ID)
+	if err != nil || detail.Replay.Eligible || detail.Replay.Reason == nil || *detail.Replay.Reason != "destination_archived" {
+		t.Fatalf("archived eligibility: %+v %v", detail, err)
+	}
+}
+
+func TestAttemptRevisionAndSchedulingDiagnostics(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	dest := createDestination(t, s, false)
+	event := ingest(t, s, dest.ID, "paused")
+	detail, err := s.GetDelivery(ctx, event.Delivery.ID)
+	if err != nil || detail.SchedulingState != "waiting_for_resume" || detail.MaxAttempts != 3 || detail.Destination.Enabled {
+		t.Fatalf("paused diagnostics: %+v %v", detail, err)
+	}
+	dest, err = s.SetDestinationEnabled(ctx, dest.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := claim(t, s, 3)
+	oldRevision := dest.Revision
+	dest, err = s.UpdateDestination(ctx, dest.ID, DestinationInput{Name: dest.Name, URL: "https://example.com/changed", Enabled: true, Revision: dest.Revision})
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := time.Now().Add(time.Hour)
+	if ok, err := s.Finish(ctx, Completion{DeliveryID: job.DeliveryID, ClaimToken: job.ClaimToken, Status: "retrying", NextAttemptAt: &next}); err != nil || !ok {
+		t.Fatalf("retry: %v %v", ok, err)
+	}
+	detail, err = s.GetDelivery(ctx, event.Delivery.ID)
+	if err != nil || detail.SchedulingState != "scheduled" || len(detail.Attempts) != 1 || detail.Attempts[0].DestinationRevision == nil || *detail.Attempts[0].DestinationRevision != oldRevision || detail.Destination.Revision != dest.Revision {
+		t.Fatalf("historical revision: %+v %v", detail, err)
+	}
+	// A legacy attempt without a revision remains unknown rather than claiming
+	// that today's configuration was used historically.
+	if _, err = s.pool.Exec(ctx, `UPDATE attempts SET destination_revision=NULL WHERE delivery_id=$1`, job.DeliveryID); err != nil {
+		t.Fatal(err)
+	}
+	detail, err = s.GetDelivery(ctx, event.Delivery.ID)
+	if err != nil || detail.Attempts[0].DestinationRevision != nil {
+		t.Fatalf("unknown historical revision: %+v %v", detail, err)
+	}
+}
+
+func TestQueueStatsSeparateEligibilityFromPausedAndFutureWork(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	enabled := createDestination(t, s, true)
+	paused := createDestination(t, s, false)
+	oldest := ingest(t, s, enabled.ID, "due")
+	future := ingest(t, s, enabled.ID, "future")
+	exhausted := ingest(t, s, enabled.ID, "exhausted")
+	blocked := ingest(t, s, paused.ID, "paused")
+	if _, err := s.pool.Exec(ctx, `UPDATE deliveries SET next_attempt_at=now()-interval '2 hours' WHERE id=$1`, oldest.Delivery.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE deliveries SET next_attempt_at=now()+interval '1 hour' WHERE id=$1`, future.Delivery.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE deliveries SET next_attempt_at=now()-interval '1 day',attempt_count=3 WHERE id=$1`, exhausted.Delivery.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE deliveries SET next_attempt_at=now()-interval '2 days' WHERE id=$1`, blocked.Delivery.ID); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := s.Stats(ctx)
+	if err != nil || stats.Events != 4 || stats.Pending != 4 || stats.Eligible != 1 || stats.Scheduled != 1 || stats.Paused != 1 || stats.OldestEligibleQueuedAgeSeconds < 7200 || stats.OldestEligibleQueuedAgeSeconds > 7210 {
+		t.Fatalf("queue stats: %+v %v", stats, err)
+	}
+	detail, err := s.GetDelivery(ctx, exhausted.Delivery.ID)
+	if err != nil || detail.SchedulingState != "attempts_exhausted" {
+		t.Fatalf("exhausted diagnostics: %+v %v", detail, err)
+	}
+	active, err := s.ListDeliveries(ctx, DeliveryFilter{Status: "active"})
+	if err != nil || len(active) != 4 {
+		t.Fatalf("active list: %d %v", len(active), err)
+	}
+	if _, err = s.SetDestinationEnabled(ctx, enabled.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	stats, err = s.Stats(ctx)
+	if err != nil || stats.Eligible != 0 || stats.Scheduled != 0 || stats.Paused != 3 || stats.OldestEligibleQueuedAgeSeconds != 0 {
+		t.Fatalf("all paused stats: %+v %v", stats, err)
 	}
 }

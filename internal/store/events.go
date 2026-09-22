@@ -102,14 +102,14 @@ func (s *Store) Replay(ctx context.Context, id, key string) (Delivery, bool, err
 		return Delivery{}, false, ErrUnavailable
 	}
 	if !available {
-		return Delivery{}, false, ErrConflict
+		return Delivery{}, false, ErrPayloadRedacted
 	}
 	original, err := scanDelivery(tx.QueryRow(ctx, `SELECT `+deliveryColumns+` FROM deliveries WHERE id=$1 FOR UPDATE`, id))
 	if err != nil {
 		return Delivery{}, false, err
 	}
 	if !terminal(original.Status) {
-		return Delivery{}, false, ErrConflict
+		return Delivery{}, false, ErrDeliveryNotTerminal
 	}
 	d, err := scanDelivery(tx.QueryRow(ctx, `INSERT INTO deliveries(id,event_id,destination_id,replay_of,replay_key,next_attempt_at) VALUES($1,$2,$3,$4,NULLIF($5,''),now()) RETURNING `+deliveryColumns, newID("dlv"), eventID, destinationID, id, key))
 	if err != nil {

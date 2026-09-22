@@ -9,15 +9,16 @@ import (
 )
 
 type Attempt struct {
-	ID         string
-	DeliveryID string
-	Number     int32
-	Status     string
-	StatusCode int32
-	ErrorCode  string
-	DurationMs int64
-	StartedAt  time.Time
-	FinishedAt *time.Time
+	ID                  string
+	DeliveryID          string
+	Number              int32
+	Status              string
+	StatusCode          int32
+	ErrorCode           string
+	DurationMs          int64
+	StartedAt           time.Time
+	FinishedAt          *time.Time
+	DestinationRevision *int64
 }
 
 type Delivery struct {
@@ -46,6 +47,7 @@ type Destination struct {
 	Archived     bool
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+	Revision     int64
 }
 
 type Event struct {

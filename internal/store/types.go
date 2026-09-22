@@ -4,17 +4,22 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 )
 
 var (
-	ErrNotFound    = errors.New("not found")
-	ErrConflict    = errors.New("conflict")
-	ErrUnavailable = errors.New("destination unavailable")
+	ErrNotFound            = errors.New("not found")
+	ErrConflict            = errors.New("conflict")
+	ErrUnavailable         = errors.New("destination unavailable")
+	ErrDestinationConflict = errors.New("destination revision conflict")
+	ErrPayloadRedacted     = fmt.Errorf("payload redacted: %w", ErrConflict)
+	ErrDeliveryNotTerminal = fmt.Errorf("delivery is not terminal: %w", ErrConflict)
 )
 
 type Destination struct {
 	ID        string    `json:"id"`
+	Revision  int64     `json:"revision"`
 	Name      string    `json:"name"`
 	URL       string    `json:"url"`
 	Enabled   bool      `json:"enabled"`
@@ -25,6 +30,7 @@ type Destination struct {
 type DestinationInput struct {
 	Name, URL, SigningSecret string
 	Enabled                  bool
+	Revision                 int64
 }
 type Event struct {
 	ID            string    `json:"id"`
@@ -58,22 +64,33 @@ type Delivery struct {
 	UpdatedAt      time.Time  `json:"updated_at"`
 }
 type Attempt struct {
-	ID         string     `json:"id"`
-	Number     int        `json:"number"`
-	Status     string     `json:"status"`
-	StatusCode int        `json:"status_code"`
-	ErrorCode  string     `json:"error_code"`
-	DurationMS int64      `json:"duration_ms"`
-	StartedAt  time.Time  `json:"started_at"`
-	FinishedAt *time.Time `json:"finished_at"`
+	ID                  string     `json:"id"`
+	DestinationRevision *int64     `json:"destination_revision"`
+	Number              int        `json:"number"`
+	Status              string     `json:"status"`
+	StatusCode          int        `json:"status_code"`
+	ErrorCode           string     `json:"error_code"`
+	DurationMS          int64      `json:"duration_ms"`
+	StartedAt           time.Time  `json:"started_at"`
+	FinishedAt          *time.Time `json:"finished_at"`
 }
 type EventDetail struct {
-	Event      Event      `json:"event"`
-	Deliveries []Delivery `json:"deliveries"`
+	Event       Event      `json:"event"`
+	Deliveries  []Delivery `json:"deliveries"`
+	RecoveredBy *string    `json:"recovered_by"`
 }
 type DeliveryDetail struct {
-	Delivery Delivery  `json:"delivery"`
-	Attempts []Attempt `json:"attempts"`
+	Delivery        Delivery          `json:"delivery"`
+	Attempts        []Attempt         `json:"attempts"`
+	Destination     Destination       `json:"destination"`
+	MaxAttempts     int               `json:"max_attempts"`
+	SchedulingState string            `json:"scheduling_state"`
+	Replay          ReplayEligibility `json:"replay"`
+	RecoveredBy     *string           `json:"recovered_by"`
+}
+type ReplayEligibility struct {
+	Eligible bool    `json:"eligible"`
+	Reason   *string `json:"reason"`
 }
 type Page struct {
 	Limit  int
@@ -88,14 +105,18 @@ type DeliveryFilter struct {
 	DestinationID, EventID, Status string
 }
 type Stats struct {
-	Destinations int64 `json:"destinations"`
-	Events       int64 `json:"events"`
-	Pending      int64 `json:"pending"`
-	Retrying     int64 `json:"retrying"`
-	Delivering   int64 `json:"delivering"`
-	Succeeded    int64 `json:"succeeded"`
-	Dead         int64 `json:"dead"`
-	Canceled     int64 `json:"canceled"`
+	Destinations                   int64   `json:"destinations"`
+	Events                         int64   `json:"events"`
+	Pending                        int64   `json:"pending"`
+	Retrying                       int64   `json:"retrying"`
+	Delivering                     int64   `json:"delivering"`
+	Succeeded                      int64   `json:"succeeded"`
+	Dead                           int64   `json:"dead"`
+	Canceled                       int64   `json:"canceled"`
+	Paused                         int64   `json:"paused"`
+	Eligible                       int64   `json:"eligible"`
+	Scheduled                      int64   `json:"scheduled"`
+	OldestEligibleQueuedAgeSeconds float64 `json:"oldest_eligible_queued_age_seconds"`
 }
 
 // Job is internal worker material. Never serialize it or log it.

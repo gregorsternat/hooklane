@@ -25,10 +25,11 @@ func (s *Store) Claim(ctx context.Context, lease time.Duration, maxAttempts int)
 	}
 	var job Job
 	var encrypted []byte
-	err = tx.QueryRow(ctx, `SELECT d.id,d.event_id,d.destination_id,t.url,t.secret_cipher,e.event_type,e.payload,d.attempt_count+1
+	var destinationRevision int64
+	err = tx.QueryRow(ctx, `SELECT d.id,d.event_id,d.destination_id,t.url,t.secret_cipher,e.event_type,e.payload,d.attempt_count+1,t.revision
  FROM deliveries d JOIN destinations t ON t.id=d.destination_id JOIN events e ON e.id=d.event_id
  WHERE d.status IN ('pending','retrying') AND d.next_attempt_at<=now() AND d.attempt_count<$1 AND t.enabled AND NOT t.archived AND e.payload IS NOT NULL
- ORDER BY d.next_attempt_at,d.id FOR UPDATE OF d SKIP LOCKED FOR SHARE OF t SKIP LOCKED LIMIT 1`, maxAttempts).Scan(&job.DeliveryID, &job.EventID, &job.DestinationID, &job.URL, &encrypted, &job.EventType, &job.Payload, &job.AttemptNumber)
+ ORDER BY d.next_attempt_at,d.id FOR UPDATE OF d SKIP LOCKED FOR SHARE OF t SKIP LOCKED LIMIT 1`, maxAttempts).Scan(&job.DeliveryID, &job.EventID, &job.DestinationID, &job.URL, &encrypted, &job.EventType, &job.Payload, &job.AttemptNumber, &destinationRevision)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, tx.Commit(ctx)
 	}
@@ -40,7 +41,7 @@ func (s *Store) Claim(ctx context.Context, lease time.Duration, maxAttempts int)
 	if err != nil {
 		return nil, err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO attempts(id,delivery_id,number,status) VALUES($1,$2,$3,'delivering')`, newID("att"), job.DeliveryID, job.AttemptNumber)
+	_, err = tx.Exec(ctx, `INSERT INTO attempts(id,delivery_id,number,status,destination_revision) VALUES($1,$2,$3,'delivering',$4)`, newID("att"), job.DeliveryID, job.AttemptNumber, destinationRevision)
 	if err != nil {
 		return nil, err
 	}

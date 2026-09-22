@@ -228,6 +228,13 @@
                   "type": "string"
                 },
                 "description": "API path of the created destination."
+              },
+              "ETag": {
+                "description": "Quoted current destination revision.",
+                "schema": {
+                  "type": "string"
+                },
+                "example": "\"2\""
               }
             }
           },
@@ -315,6 +322,15 @@
                   "$ref": "#/components/schemas/Destination"
                 }
               }
+            },
+            "headers": {
+              "ETag": {
+                "description": "Quoted current destination revision.",
+                "schema": {
+                  "type": "string"
+                },
+                "example": "\"2\""
+              }
             }
           },
           "400": {
@@ -338,7 +354,7 @@
       },
       "put": {
         "operationId": "updateDestination",
-        "summary": "Update, pause, resume, or rotate a destination secret",
+        "summary": "Edit destination configuration or rotate its signing secret",
         "tags": [
           "Destinations"
         ],
@@ -350,6 +366,15 @@
                 "schema": {
                   "$ref": "#/components/schemas/Destination"
                 }
+              }
+            },
+            "headers": {
+              "ETag": {
+                "description": "Quoted current destination revision.",
+                "schema": {
+                  "type": "string"
+                },
+                "example": "\"2\""
               }
             }
           },
@@ -376,9 +401,15 @@
           },
           "503": {
             "$ref": "#/components/responses/Error503"
+          },
+          "412": {
+            "$ref": "#/components/responses/Error412"
+          },
+          "428": {
+            "$ref": "#/components/responses/Error428"
           }
         },
-        "description": "Requires name and url. Omitted enabled preserves its current value. Omitted or empty signing_secret preserves its current value. Pausing stops future claims and still accepts ingestion. An already claimed attempt can finish. Archived destinations cannot be edited. Request maximum: 16 KiB. DNS/network validation runs only when url changes, so an unchanged destination remains editable during a DNS outage.",
+        "description": "Requires name, url and If-Match with the quoted revision from the edited destination. The revision is checked atomically, including changes during URL validation. Missing precondition returns 428; a stale revision returns 412 destination_conflict. Omitted enabled preserves the current value; omitted or empty signing_secret preserves the secret. Use PATCH /enabled for pause/resume without sending stale configuration. Archived destinations cannot be edited. Request maximum: 16 KiB. DNS/network validation runs only when url changes, so unchanged endpoints remain editable during a DNS outage.",
         "requestBody": {
           "required": true,
           "content": {
@@ -392,6 +423,17 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/ResourceID"
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^\"[1-9][0-9]*\"$"
+            },
+            "example": "\"2\"",
+            "description": "One strong quoted revision from the destination metadata or ETag. Wildcards, weak validators and lists are unsupported."
           }
         ]
       },
@@ -714,7 +756,7 @@
             "name": "status",
             "in": "query",
             "required": false,
-            "description": "Filter by the current delivery state.",
+            "description": "Delivery state. active selects pending, retrying and delivering together.",
             "schema": {
               "type": "string",
               "enum": [
@@ -723,7 +765,8 @@
                 "delivering",
                 "succeeded",
                 "dead",
-                "canceled"
+                "canceled",
+                "active"
               ]
             }
           }
@@ -815,7 +858,7 @@
             "$ref": "#/components/responses/Error503"
           }
         },
-        "description": "No body is required. The original must be succeeded, dead, or canceled, with a retained payload and a non-archived destination. A paused destination may queue a replay. Creates a fresh delivery with attempt_count zero and replay_of referencing the requested original; original attempts remain unchanged. Idempotency is scoped to the original delivery and key. An already accepted replay key returns its existing work even after payload redaction or destination archival, without creating new work.",
+        "description": "No body is required. The original must be succeeded, dead, or canceled, with a retained payload and a non-archived destination. A paused destination may queue a replay. Creates a fresh delivery with attempt_count zero and replay_of referencing the requested original; original attempts remain unchanged. Idempotency is scoped to the original delivery and key. An already accepted replay key returns its existing work even after payload redaction or destination archival, without creating new work. Detail metadata exposes replay eligibility and safe reasons before confirmation. Eligibility is rechecked transactionally: 409 payload_redacted indicates permanent payload removal, 409 destination_unavailable indicates archival, and 409 delivery_not_terminal indicates a state that may become eligible after refresh.",
         "parameters": [
           {
             "$ref": "#/components/parameters/ResourceID"
@@ -916,6 +959,86 @@
           "503": {
             "$ref": "#/components/responses/Error503"
           }
+        },
+        "description": " All values are gauges derived from one database snapshot. hooklane_queued_deliveries has only the bounded state labels paused, eligible and scheduled. hooklane_oldest_eligible_queued_age_seconds measures seconds past due for currently eligible queued work and is zero when none; it excludes paused work. Retained delivery gauges include replay records and may decrease after retention."
+      }
+    },
+    "/api/v1/destinations/{id}/enabled": {
+      "patch": {
+        "operationId": "setDestinationEnabled",
+        "summary": "Pause or resume a destination",
+        "tags": [
+          "Destinations"
+        ],
+        "description": "Updates only enabled and advances the revision. No full-edit precondition is needed: a stale caller cannot overwrite the name, endpoint or signing secret. Paused destinations still accept events; in-flight requests may finish. Archived destinations cannot resume. Request maximum: 1 KiB.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ResourceID"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "enabled"
+                ],
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated destination metadata.",
+            "headers": {
+              "ETag": {
+                "description": "Quoted current destination revision.",
+                "schema": {
+                  "type": "string"
+                },
+                "example": "\"2\""
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Destination"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
         }
       }
     }
@@ -973,7 +1096,7 @@
         "name": "Idempotency-Key",
         "in": "header",
         "required": true,
-        "description": "Stable operation key, 1–128 visible ASCII characters (no spaces). Reuse the same key when a request times out or its outcome is uncertain.",
+        "description": "Stable operation key, 1\u2013128 visible ASCII characters (no spaces). Reuse the same key when a request times out or its outcome is uncertain.",
         "schema": {
           "type": "string",
           "minLength": 1,
@@ -1044,6 +1167,12 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "description": "Monotonic configuration revision. Full edits must send this value as a quoted If-Match header. Enabled-only updates and archive also advance it."
           }
         },
         "required": [
@@ -1053,7 +1182,8 @@
           "enabled",
           "archived",
           "created_at",
-          "updated_at"
+          "updated_at",
+          "revision"
         ]
       },
       "CreateDestination": {
@@ -1064,7 +1194,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 120,
-            "description": "Trimmed name, 1–120 UTF-8 bytes, with no Unicode control characters."
+            "description": "Trimmed name, 1\u2013120 UTF-8 bytes, with no Unicode control characters."
           },
           "url": {
             "type": "string",
@@ -1077,7 +1207,7 @@
             "minLength": 32,
             "maxLength": 512,
             "writeOnly": true,
-            "description": "32–512 UTF-8 bytes without control characters. Encrypted at rest; never returned by the API. Keep the receiver configured with this same secret."
+            "description": "32\u2013512 UTF-8 bytes without control characters. Encrypted at rest; never returned by the API. Keep the receiver configured with this same secret."
           },
           "enabled": {
             "type": "boolean",
@@ -1098,7 +1228,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 120,
-            "description": "Trimmed name, 1–120 UTF-8 bytes, with no Unicode control characters."
+            "description": "Trimmed name, 1\u2013120 UTF-8 bytes, with no Unicode control characters."
           },
           "url": {
             "type": "string",
@@ -1113,7 +1243,7 @@
                 "minLength": 32,
                 "maxLength": 512,
                 "writeOnly": true,
-                "description": "32–512 UTF-8 bytes without control characters. Encrypted at rest; never returned by the API. Keep the receiver configured with this same secret."
+                "description": "32\u2013512 UTF-8 bytes without control characters. Encrypted at rest; never returned by the API. Keep the receiver configured with this same secret."
               },
               {
                 "type": "string",
@@ -1218,7 +1348,7 @@
           },
           "last_error": {
             "type": "string",
-            "description": "Safe error code. Response bodies and transport error details are never exposed."
+            "description": "Safe code only; no raw transport error or response body. Includes destination_blocked, attempts_exhausted, secret_decryption_failed, interrupted, lease_expired, destination_archived, timeout, dns_error, tls_error, connection_error and network_error, plus response classification codes."
           },
           "created_at": {
             "type": "string",
@@ -1270,7 +1400,8 @@
             "maximum": 599
           },
           "error_code": {
-            "type": "string"
+            "type": "string",
+            "description": "Safe code only; no raw transport error or response body. Includes destination_blocked, attempts_exhausted, secret_decryption_failed, interrupted, lease_expired, destination_archived, timeout, dns_error, tls_error, connection_error and network_error, plus response classification codes."
           },
           "duration_ms": {
             "type": "integer",
@@ -1287,6 +1418,15 @@
               "null"
             ],
             "format": "date-time"
+          },
+          "destination_revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 1,
+            "description": "Non-secret destination revision captured atomically at claim time. Null for attempts created before revision tracking; historical configuration is never inferred from the current destination."
           }
         },
         "required": [
@@ -1297,7 +1437,8 @@
           "error_code",
           "duration_ms",
           "started_at",
-          "finished_at"
+          "finished_at",
+          "destination_revision"
         ]
       },
       "EventDetail": {
@@ -1314,11 +1455,20 @@
             },
             "maxItems": 100,
             "description": "Newest 100 delivery records. Use GET /api/v1/deliveries?event_id=... for complete paginated history."
+          },
+          "recovered_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^dlv_[0-9a-f]{36}$",
+            "description": "A successful descendant replay of a retained dead delivery, or null. Delivery detail traverses descendants of this source only; older or unrelated successes do not count. Original failures and attempts remain unchanged."
           }
         },
         "required": [
           "event",
-          "deliveries"
+          "deliveries",
+          "recovered_by"
         ]
       },
       "DeliveryDetail": {
@@ -1334,12 +1484,52 @@
               "$ref": "#/components/schemas/Attempt"
             },
             "description": "Persisted attempts in ascending attempt-number order. Expired claims are recorded as abandoned."
+          },
+          "recovered_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^dlv_[0-9a-f]{36}$",
+            "description": "A successful descendant replay of a retained dead delivery, or null. Delivery detail traverses descendants of this source only; older or unrelated successes do not count. Original failures and attempts remain unchanged."
+          },
+          "destination": {
+            "$ref": "#/components/schemas/Destination"
+          },
+          "max_attempts": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Current effective server attempt budget. A lower configured budget also applies to previously queued work; each replay starts with zero attempts."
+          },
+          "scheduling_state": {
+            "type": "string",
+            "enum": [
+              "terminal",
+              "delivering",
+              "destination_archived",
+              "waiting_for_resume",
+              "attempts_exhausted",
+              "payload_redacted",
+              "unscheduled",
+              "scheduled",
+              "eligible"
+            ],
+            "description": "Scheduling diagnosis from the same metadata snapshot. eligible is due queued work with a retained payload, enabled non-archived destination, and remaining attempts. unscheduled identifies queued work lacking a schedule."
+          },
+          "replay": {
+            "$ref": "#/components/schemas/ReplayEligibility"
           }
         },
         "required": [
           "delivery",
-          "attempts"
-        ]
+          "attempts",
+          "recovered_by",
+          "destination",
+          "max_attempts",
+          "scheduling_state",
+          "replay"
+        ],
+        "description": "Consistent read-only metadata snapshot including destination state, replay eligibility, recovery lineage and scheduling. Contains no payload, signing secret or raw receiver error."
       },
       "IngestEvent": {
         "type": "object",
@@ -1353,7 +1543,7 @@
             "minLength": 1,
             "maxLength": 120,
             "pattern": "^[!-~]+$",
-            "description": "1–120 visible ASCII characters, without spaces."
+            "description": "1\u2013120 visible ASCII characters, without spaces."
           },
           "payload": {
             "description": "Any valid JSON value, including objects, arrays, strings, numbers, booleans, or null. Hooklane stores the exact raw JSON value bytes captured from the request. Whitespace and key ordering inside that value affect its digest and idempotency comparison. The value defaults to a maximum of 1 MiB, configurable by the installation; the whole request is capped at that limit plus 16 KiB."
@@ -1444,6 +1634,29 @@
             "type": "integer",
             "minimum": 0,
             "format": "int64"
+          },
+          "paused": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Queued work waiting for a destination to resume, with retained payload and remaining attempts."
+          },
+          "eligible": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Queued work due for a worker now, with enabled non-archived destination, retained payload and remaining attempts."
+          },
+          "scheduled": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Queued work with a future schedule, enabled non-archived destination, retained payload and remaining attempts."
+          },
+          "oldest_eligible_queued_age_seconds": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Maximum seconds past next_attempt_at among eligible queued work, or zero when none. Excludes paused, future-scheduled, archived and exhausted work."
           }
         },
         "required": [
@@ -1454,8 +1667,13 @@
           "delivering",
           "succeeded",
           "dead",
-          "canceled"
-        ]
+          "canceled",
+          "paused",
+          "eligible",
+          "scheduled",
+          "oldest_eligible_queued_age_seconds"
+        ],
+        "description": "One PostgreSQL snapshot of retained records across all retained time. Delivery counts include originals and replays. Success rate is succeeded / (succeeded + dead), excluding canceled and active work. Historical failures remain after successful recovery. Retention can reduce all retained-record gauges; these are not lifetime counters."
       },
       "Session": {
         "type": "object",
@@ -1571,6 +1789,32 @@
           "items",
           "next_cursor"
         ]
+      },
+      "ReplayEligibility": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "eligible": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              null,
+              "payload_redacted",
+              "destination_archived",
+              "delivery_not_terminal"
+            ],
+            "description": "Null when eligible. Redaction and archival are permanent restrictions; a nonterminal source may become eligible after refresh. This snapshot is advisory; the replay transaction checks again."
+          }
+        },
+        "required": [
+          "eligible",
+          "reason"
+        ]
       }
     },
     "responses": {
@@ -1672,6 +1916,26 @@
       },
       "Error503": {
         "description": "Service, authentication configuration, persistence, or validation is temporarily unavailable. An operation may have committed before the response failed; safely retry ingestion/replay with the same idempotency key.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Error412": {
+        "description": "destination_conflict: the supplied revision is stale. Reload current configuration and reconcile the intended edits before saving.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Error428": {
+        "description": "precondition_required: full edits require If-Match containing the quoted destination revision.",
         "content": {
           "application/json": {
             "schema": {

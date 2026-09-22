@@ -23,14 +23,16 @@ const (
 
 type fakeBackend struct {
 	backend
-	create    func(context.Context, store.DestinationInput) (store.Destination, error)
-	update    func(context.Context, string, store.DestinationInput) (store.Destination, error)
-	get       func(context.Context, string) (store.Destination, error)
-	ingest    func(context.Context, store.IngestInput) (store.IngestResult, error)
-	list      func(context.Context, store.Page) ([]store.Destination, error)
-	listEvent func(context.Context, store.EventFilter) ([]store.Event, error)
-	stats     func(context.Context) (store.Stats, error)
-	cancel    func(context.Context, string) error
+	create     func(context.Context, store.DestinationInput) (store.Destination, error)
+	update     func(context.Context, string, store.DestinationInput) (store.Destination, error)
+	setEnabled func(context.Context, string, bool) (store.Destination, error)
+	replay     func(context.Context, string, string) (store.Delivery, bool, error)
+	get        func(context.Context, string) (store.Destination, error)
+	ingest     func(context.Context, store.IngestInput) (store.IngestResult, error)
+	list       func(context.Context, store.Page) ([]store.Destination, error)
+	listEvent  func(context.Context, store.EventFilter) ([]store.Event, error)
+	stats      func(context.Context) (store.Stats, error)
+	cancel     func(context.Context, string) error
 }
 
 func (f fakeBackend) CreateDestination(ctx context.Context, in store.DestinationInput) (store.Destination, error) {
@@ -38,6 +40,12 @@ func (f fakeBackend) CreateDestination(ctx context.Context, in store.Destination
 }
 func (f fakeBackend) UpdateDestination(ctx context.Context, id string, in store.DestinationInput) (store.Destination, error) {
 	return f.update(ctx, id, in)
+}
+func (f fakeBackend) SetDestinationEnabled(ctx context.Context, id string, enabled bool) (store.Destination, error) {
+	return f.setEnabled(ctx, id, enabled)
+}
+func (f fakeBackend) Replay(ctx context.Context, id, key string) (store.Delivery, bool, error) {
+	return f.replay(ctx, id, key)
 }
 func (f fakeBackend) GetDestination(ctx context.Context, id string) (store.Destination, error) {
 	return f.get(ctx, id)
@@ -89,7 +97,7 @@ func TestAuthenticationScopes(t *testing.T) {
 	for _, route := range []struct{ method, path string }{
 		{"GET", "/api/v1/stats"}, {"GET", "/api/v1/metrics"}, {"GET", "/api/v1/destinations"},
 		{"POST", "/api/v1/destinations"}, {"GET", "/api/v1/destinations/" + dstID},
-		{"PUT", "/api/v1/destinations/" + dstID}, {"DELETE", "/api/v1/destinations/" + dstID},
+		{"PUT", "/api/v1/destinations/" + dstID}, {"PATCH", "/api/v1/destinations/" + dstID + "/enabled"}, {"DELETE", "/api/v1/destinations/" + dstID},
 		{"GET", "/api/v1/events"}, {"GET", "/api/v1/events/" + evtID},
 		{"DELETE", "/api/v1/events/" + evtID + "/payload"}, {"GET", "/api/v1/deliveries"},
 		{"GET", "/api/v1/deliveries/" + dlvID}, {"POST", "/api/v1/deliveries/" + dlvID + "/replay"},
@@ -379,7 +387,7 @@ func TestDestinationPauseDuringDNSOutage(t *testing.T) {
 	updates := 0
 	h := testAPI(fakeBackend{
 		get: func(context.Context, string) (store.Destination, error) {
-			return store.Destination{ID: dstID, Name: "Old name", URL: "https://offline.example/hook", Enabled: false}, nil
+			return store.Destination{ID: dstID, Name: "Old name", URL: "https://offline.example/hook", Enabled: false, Revision: 1}, nil
 		},
 		update: func(_ context.Context, id string, in store.DestinationInput) (store.Destination, error) {
 			if id != dstID || in.Enabled || in.SigningSecret != "" || in.Name != "Paused destination" {
@@ -389,11 +397,11 @@ func TestDestinationPauseDuringDNSOutage(t *testing.T) {
 			return store.Destination{ID: id, Name: in.Name, URL: in.URL, Enabled: in.Enabled}, nil
 		},
 	}, options)
-	w := request(h, "PUT", "/api/v1/destinations/"+dstID, adminToken, `{"name":"Paused destination","url":"https://offline.example/hook"}`, nil)
+	w := request(h, "PUT", "/api/v1/destinations/"+dstID, adminToken, `{"name":"Paused destination","url":"https://offline.example/hook"}`, map[string]string{"If-Match": `"1"`})
 	if w.Code != http.StatusOK || updates != 1 {
 		t.Fatalf("existing offline destination should remain editable: %d %s", w.Code, w.Body)
 	}
-	w = request(h, "PUT", "/api/v1/destinations/"+dstID, adminToken, `{"name":"Paused destination","url":"https://changed.example/hook"}`, nil)
+	w = request(h, "PUT", "/api/v1/destinations/"+dstID, adminToken, `{"name":"Paused destination","url":"https://changed.example/hook"}`, map[string]string{"If-Match": `"1"`})
 	if w.Code != http.StatusBadRequest || updates != 1 {
 		t.Fatalf("URL change must validate DNS: %d %s", w.Code, w.Body)
 	}
@@ -421,5 +429,108 @@ func TestStoreRoutesWaitForInitialization(t *testing.T) {
 	w = request(h, "GET", "/healthz", "", "", nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("liveness unavailable during database initialization: %d", w.Code)
+	}
+}
+
+func TestDestinationUpdateRequiresCurrentRevision(t *testing.T) {
+	updates := 0
+	h := testAPI(fakeBackend{
+		get: func(context.Context, string) (store.Destination, error) {
+			return store.Destination{ID: dstID, Name: "Current", URL: "https://example.com/hook", Revision: 2}, nil
+		},
+		update: func(_ context.Context, _ string, in store.DestinationInput) (store.Destination, error) {
+			updates++
+			if in.Revision != 2 {
+				t.Fatalf("missing revision at persistence boundary: %+v", in)
+			}
+			// Simulate another save after the read and before the atomic update.
+			return store.Destination{}, store.ErrDestinationConflict
+		},
+	}, testOptions())
+	for _, tc := range []struct {
+		header string
+		status int
+		code   string
+	}{
+		{"", 428, "precondition_required"},
+		{`W/"2"`, 400, "invalid_precondition"},
+		{`*`, 400, "invalid_precondition"},
+		{`"1"`, 412, "destination_conflict"},
+		{`"2"`, 412, "destination_conflict"},
+	} {
+		w := request(h, "PUT", "/api/v1/destinations/"+dstID, adminToken, `{"name":"Edit","url":"https://example.com/hook"}`, map[string]string{"If-Match": tc.header})
+		if w.Code != tc.status || !strings.Contains(w.Body.String(), tc.code) {
+			t.Fatalf("precondition %q: %d %s", tc.header, w.Code, w.Body)
+		}
+	}
+	if updates != 1 {
+		t.Fatalf("stale/malformed preconditions reached update: %d", updates)
+	}
+}
+
+func TestPauseOnlyAcceptsEnabledAndSkipsURLValidation(t *testing.T) {
+	updates := 0
+	options := testOptions()
+	options.ValidateURL = func(context.Context, string) error { t.Fatal("pause must not validate DNS"); return nil }
+	h := testAPI(fakeBackend{setEnabled: func(_ context.Context, id string, enabled bool) (store.Destination, error) {
+		updates++
+		if id != dstID || enabled {
+			t.Fatalf("pause input: %s %v", id, enabled)
+		}
+		return store.Destination{ID: id, URL: "https://example.com/newer", Enabled: false, Revision: 4}, nil
+	}}, options)
+	for _, body := range []string{`{}`, `{"enabled":null}`, `{"enabled":false,"url":"https://example.com/stale"}`} {
+		w := request(h, "PATCH", "/api/v1/destinations/"+dstID+"/enabled", adminToken, body, nil)
+		if w.Code != 400 {
+			t.Fatalf("invalid enabled body %s: %d %s", body, w.Code, w.Body)
+		}
+	}
+	w := request(h, "PATCH", "/api/v1/destinations/"+dstID+"/enabled", adminToken, `{"enabled":false}`, nil)
+	if w.Code != 200 || updates != 1 || w.Header().Get("ETag") != `"4"` || !strings.Contains(w.Body.String(), "https://example.com/newer") {
+		t.Fatalf("pause: %d %s", w.Code, w.Body)
+	}
+}
+
+func TestReplayRejectionsHaveActionableReasons(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		code string
+	}{
+		{store.ErrPayloadRedacted, "payload_redacted"},
+		{store.ErrUnavailable, "destination_unavailable"},
+		{store.ErrDeliveryNotTerminal, "delivery_not_terminal"},
+	} {
+		h := testAPI(fakeBackend{replay: func(context.Context, string, string) (store.Delivery, bool, error) {
+			return store.Delivery{}, false, tc.err
+		}}, testOptions())
+		w := request(h, "POST", "/api/v1/deliveries/"+dlvID+"/replay", adminToken, "", map[string]string{"Idempotency-Key": "same-replay"})
+		if w.Code != 409 || !strings.Contains(w.Body.String(), tc.code) {
+			t.Fatalf("replay error: %d %s", w.Code, w.Body)
+		}
+	}
+}
+
+func TestQueueMetricsUseOneSnapshotAndBoundedGaugeLabels(t *testing.T) {
+	calls := 0
+	h := testAPI(fakeBackend{stats: func(context.Context) (store.Stats, error) {
+		calls++
+		return store.Stats{Paused: 4, Eligible: 2, Scheduled: 1, OldestEligibleQueuedAgeSeconds: 123.5}, nil
+	}}, testOptions())
+	w := request(h, "GET", "/api/v1/metrics", adminToken, "", nil)
+	for _, expected := range []string{
+		"# TYPE hooklane_deliveries gauge",
+		"# TYPE hooklane_queued_deliveries gauge",
+		`hooklane_queued_deliveries{state="paused"} 4`,
+		`hooklane_queued_deliveries{state="eligible"} 2`,
+		`hooklane_queued_deliveries{state="scheduled"} 1`,
+		"# TYPE hooklane_oldest_eligible_queued_age_seconds gauge",
+		"hooklane_oldest_eligible_queued_age_seconds 123.5",
+	} {
+		if !strings.Contains(w.Body.String(), expected) {
+			t.Fatalf("missing metric %q in %s", expected, w.Body)
+		}
+	}
+	if calls != 1 || w.Code != 200 {
+		t.Fatalf("metrics snapshot calls=%d status=%d", calls, w.Code)
 	}
 }

@@ -11,18 +11,19 @@ import (
 )
 
 const deliveryAttempts = `-- name: DeliveryAttempts :many
-SELECT id,number,status,status_code,error_code,duration_ms,started_at,finished_at FROM attempts WHERE delivery_id=$1 ORDER BY number
+SELECT id,number,status,status_code,error_code,duration_ms,started_at,finished_at,destination_revision FROM attempts WHERE delivery_id=$1 ORDER BY number
 `
 
 type DeliveryAttemptsRow struct {
-	ID         string
-	Number     int32
-	Status     string
-	StatusCode int32
-	ErrorCode  string
-	DurationMs int64
-	StartedAt  time.Time
-	FinishedAt *time.Time
+	ID                  string
+	Number              int32
+	Status              string
+	StatusCode          int32
+	ErrorCode           string
+	DurationMs          int64
+	StartedAt           time.Time
+	FinishedAt          *time.Time
+	DestinationRevision *int64
 }
 
 func (q *Queries) DeliveryAttempts(ctx context.Context, deliveryID string) ([]DeliveryAttemptsRow, error) {
@@ -43,6 +44,7 @@ func (q *Queries) DeliveryAttempts(ctx context.Context, deliveryID string) ([]De
 			&i.DurationMs,
 			&i.StartedAt,
 			&i.FinishedAt,
+			&i.DestinationRevision,
 		); err != nil {
 			return nil, err
 		}
@@ -142,7 +144,7 @@ func (q *Queries) GetDelivery(ctx context.Context, id string) (GetDeliveryRow, e
 }
 
 const getDestination = `-- name: GetDestination :one
-SELECT id,name,url,enabled,archived,created_at,updated_at FROM destinations WHERE id=$1
+SELECT id,name,url,enabled,archived,created_at,updated_at,revision FROM destinations WHERE id=$1
 `
 
 type GetDestinationRow struct {
@@ -153,6 +155,7 @@ type GetDestinationRow struct {
 	Archived  bool
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	Revision  int64
 }
 
 func (q *Queries) GetDestination(ctx context.Context, id string) (GetDestinationRow, error) {
@@ -166,6 +169,7 @@ func (q *Queries) GetDestination(ctx context.Context, id string) (GetDestination
 		&i.Archived,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Revision,
 	)
 	return i, err
 }
@@ -204,7 +208,7 @@ SELECT id,event_id,destination_id,COALESCE(replay_of,'')::text AS replay_of,stat
 WHERE ($1::text = '' OR id < $1)
 AND ($2::text = '' OR destination_id=$2)
 AND ($3::text = '' OR event_id=$3)
-AND ($4::text = '' OR status=$4)
+AND ($4::text = '' OR status=$4 OR ($4='active' AND status IN ('pending','retrying','delivering')))
 ORDER BY id DESC LIMIT $5
 `
 
@@ -269,7 +273,7 @@ func (q *Queries) ListDeliveries(ctx context.Context, arg ListDeliveriesParams) 
 }
 
 const listDestinations = `-- name: ListDestinations :many
-SELECT id,name,url,enabled,archived,created_at,updated_at FROM destinations WHERE ($1::text = '' OR id < $1) ORDER BY id DESC LIMIT $2
+SELECT id,name,url,enabled,archived,created_at,updated_at,revision FROM destinations WHERE ($1::text = '' OR id < $1) ORDER BY id DESC LIMIT $2
 `
 
 type ListDestinationsParams struct {
@@ -285,6 +289,7 @@ type ListDestinationsRow struct {
 	Archived  bool
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	Revision  int64
 }
 
 func (q *Queries) ListDestinations(ctx context.Context, arg ListDestinationsParams) ([]ListDestinationsRow, error) {
@@ -304,6 +309,7 @@ func (q *Queries) ListDestinations(ctx context.Context, arg ListDestinationsPara
 			&i.Archived,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Revision,
 		); err != nil {
 			return nil, err
 		}
@@ -373,7 +379,46 @@ func (q *Queries) ListEvents(ctx context.Context, arg ListEventsParams) ([]ListE
 	return items, nil
 }
 
+const recoveredDelivery = `-- name: RecoveredDelivery :one
+WITH RECURSIVE lineage AS (
+ SELECT source.id,source.status FROM deliveries source WHERE source.replay_of=$1
+ UNION ALL
+ SELECT d.id,d.status FROM deliveries d JOIN lineage l ON d.replay_of=l.id
+)
+SELECT id FROM lineage WHERE status='succeeded' ORDER BY id DESC LIMIT 1
+`
+
+func (q *Queries) RecoveredDelivery(ctx context.Context, replayOf *string) (string, error) {
+	row := q.db.QueryRow(ctx, recoveredDelivery, replayOf)
+	var id string
+	err := row.Scan(&id)
+	return id, err
+}
+
+const recoveredEvent = `-- name: RecoveredEvent :one
+WITH RECURSIVE lineage AS (
+ SELECT source.id,source.status FROM deliveries source WHERE source.event_id=$1 AND source.status='dead'
+ UNION
+ SELECT d.id,d.status FROM deliveries d JOIN lineage l ON d.replay_of=l.id
+)
+SELECT id FROM lineage WHERE status='succeeded' ORDER BY id DESC LIMIT 1
+`
+
+func (q *Queries) RecoveredEvent(ctx context.Context, eventID string) (string, error) {
+	row := q.db.QueryRow(ctx, recoveredEvent, eventID)
+	var id string
+	err := row.Scan(&id)
+	return id, err
+}
+
 const stats = `-- name: Stats :one
+WITH work AS (
+ SELECT d.id, d.event_id, d.destination_id, d.replay_of, d.replay_key, d.status, d.attempt_count, d.next_attempt_at, d.last_status_code, d.last_error, d.claim_token, d.lease_until, d.created_at, d.updated_at, t.enabled, t.archived, e.payload IS NOT NULL AS payload_available
+ FROM deliveries d JOIN destinations t ON t.id=d.destination_id JOIN events e ON e.id=d.event_id
+), queued AS (
+ SELECT id, event_id, destination_id, replay_of, replay_key, status, attempt_count, next_attempt_at, last_status_code, last_error, claim_token, lease_until, created_at, updated_at, enabled, archived, payload_available, NOT archived AND payload_available AND attempt_count < $1::integer AS claimable
+ FROM work WHERE status IN ('pending','retrying')
+)
 SELECT
  (SELECT count(*) FROM destinations WHERE NOT archived) AS destinations,
  (SELECT count(*) FROM events) AS events,
@@ -382,23 +427,31 @@ SELECT
  count(*) FILTER (WHERE status='delivering') AS delivering,
  count(*) FILTER (WHERE status='succeeded') AS succeeded,
  count(*) FILTER (WHERE status='dead') AS dead,
- count(*) FILTER (WHERE status='canceled') AS canceled
-FROM deliveries
+ count(*) FILTER (WHERE status='canceled') AS canceled,
+ (SELECT count(*) FROM queued WHERE claimable AND NOT enabled) AS paused,
+ (SELECT count(*) FROM queued WHERE claimable AND enabled AND next_attempt_at<=now()) AS eligible,
+ (SELECT count(*) FROM queued WHERE claimable AND enabled AND next_attempt_at>now()) AS scheduled,
+ (SELECT COALESCE(max(EXTRACT(EPOCH FROM now()-next_attempt_at)),0)::double precision FROM queued WHERE claimable AND enabled AND next_attempt_at<=now()) AS oldest_eligible_queued_age_seconds
+FROM work
 `
 
 type StatsRow struct {
-	Destinations int64
-	Events       int64
-	Pending      int64
-	Retrying     int64
-	Delivering   int64
-	Succeeded    int64
-	Dead         int64
-	Canceled     int64
+	Destinations                   int64
+	Events                         int64
+	Pending                        int64
+	Retrying                       int64
+	Delivering                     int64
+	Succeeded                      int64
+	Dead                           int64
+	Canceled                       int64
+	Paused                         int64
+	Eligible                       int64
+	Scheduled                      int64
+	OldestEligibleQueuedAgeSeconds float64
 }
 
-func (q *Queries) Stats(ctx context.Context) (StatsRow, error) {
-	row := q.db.QueryRow(ctx, stats)
+func (q *Queries) Stats(ctx context.Context, maxAttempts int32) (StatsRow, error) {
+	row := q.db.QueryRow(ctx, stats, maxAttempts)
 	var i StatsRow
 	err := row.Scan(
 		&i.Destinations,
@@ -409,6 +462,10 @@ func (q *Queries) Stats(ctx context.Context) (StatsRow, error) {
 		&i.Succeeded,
 		&i.Dead,
 		&i.Canceled,
+		&i.Paused,
+		&i.Eligible,
+		&i.Scheduled,
+		&i.OldestEligibleQueuedAgeSeconds,
 	)
 	return i, err
 }
