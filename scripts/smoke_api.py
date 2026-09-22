@@ -16,12 +16,14 @@ SECRET = 'smoke-signing-secret-at-least-32-characters'
 urllib.request.install_opener(urllib.request.build_opener(urllib.request.ProxyHandler({})))
 
 
-def request(method, path, data=None, expected=200, token=ADMIN, key=None):
+def request(method, path, data=None, expected=200, token=ADMIN, key=None, revision=None):
     headers = {}
     if token:
         headers['Authorization'] = 'Bearer ' + token
     if key:
         headers['Idempotency-Key'] = key
+    if revision is not None:
+        headers['If-Match'] = f'"{revision}"'
     body = None
     if data is not None:
         body = json.dumps(data, separators=(',', ':')).encode()
@@ -77,6 +79,17 @@ def main():
     request('POST', '/api/v1/destinations', dict(destination, url='http://169.254.169.254/latest/meta-data'), expected=400)
     created = request('POST', '/api/v1/destinations', destination, expected=201)
     did = created['id']
+    # A full edit needs the revision actually read by its editor. A stale pause
+    # must not send any old endpoint or signing configuration back to the server.
+    request('PUT', '/api/v1/destinations/' + did, destination, expected=428)
+    changed = request('PUT', '/api/v1/destinations/' + did,
+                      dict(destination, url='http://receiver:8099/webhook-v2'), revision=created['revision'])
+    paused_config = request('PATCH', f'/api/v1/destinations/{did}/enabled', {'enabled': False})
+    assert paused_config['url'] == changed['url'] and paused_config['revision'] > changed['revision']
+    conflict = request('PUT', '/api/v1/destinations/' + did, destination,
+                       expected=412, revision=created['revision'])
+    assert conflict['error']['code'] == 'destination_conflict'
+    current = request('PUT', '/api/v1/destinations/' + did, destination, revision=paused_config['revision'])
     event = {'destination_id': did, 'type': 'smoke.created', 'payload': {'private': 'smoke-payload-never-returned'}}
     request('POST', '/api/v1/events', event, expected=400, token=INGEST)
     accepted = request('POST', '/api/v1/events', event, expected=202, token=INGEST, key='smoke-event-1')
@@ -89,6 +102,8 @@ def main():
     delivered = wait_delivery(delivery_id)
     assert delivered['delivery']['attempt_count'] == 2, delivered
     assert sorted(a['status_code'] for a in delivered['attempts']) == [204, 503]
+    assert all(a['destination_revision'] == current['revision'] for a in delivered['attempts'])
+    assert delivered['replay']['eligible'] and delivered['max_attempts'] == 4
     replay = request('POST', f'/api/v1/deliveries/{delivery_id}/replay', expected=202, key='smoke-replay-1')
     replay_again = request('POST', f'/api/v1/deliveries/{delivery_id}/replay', key='smoke-replay-1')
     assert replay_again['duplicate'] and replay_again['delivery']['id'] == replay['delivery']['id']
@@ -101,20 +116,28 @@ def main():
     assert len(second['items']) == 1 and first['items'][0]['id'] != second['items'][0]['id']
     request('DELETE', f'/api/v1/events/{eid}/payload', expected=204)
     assert request('GET', '/api/v1/events/' + eid)['event']['redacted']
-    request('POST', f'/api/v1/deliveries/{delivery_id}/replay', expected=409, key='after-redaction')
-    request('PUT', '/api/v1/destinations/' + did, dict(destination, enabled=False, signing_secret=''))
+    redacted_detail = request('GET', '/api/v1/deliveries/' + delivery_id)
+    assert not redacted_detail['replay']['eligible'] and redacted_detail['replay']['reason'] == 'payload_redacted'
+    rejection = request('POST', f'/api/v1/deliveries/{delivery_id}/replay', expected=409, key='after-redaction')
+    assert rejection['error']['code'] == 'payload_redacted'
+    request('PATCH', f'/api/v1/destinations/{did}/enabled', {'enabled': False})
     paused = request('POST', '/api/v1/events', event, expected=202, token=INGEST, key='paused-event')
     time.sleep(0.5)
     pending_id = paused['delivery']['id']
-    assert request('GET', '/api/v1/deliveries/' + pending_id)['delivery']['status'] == 'pending'
+    paused_detail = request('GET', '/api/v1/deliveries/' + pending_id)
+    assert paused_detail['delivery']['status'] == 'pending' and not paused_detail['destination']['enabled']
+    stats = request('GET', '/api/v1/stats')
+    assert stats['paused'] == 1 and stats['eligible'] == 0 and stats['oldest_eligible_queued_age_seconds'] == 0
     request('DELETE', '/api/v1/events/' + paused['event']['id'] + '/payload', expected=409)
     request('POST', f'/api/v1/deliveries/{pending_id}/cancel', expected=204)
     request('DELETE', '/api/v1/destinations/' + did, expected=204)
+    archived_detail = request('GET', '/api/v1/deliveries/' + pending_id)
+    assert not archived_detail['replay']['eligible'] and archived_detail['replay']['reason'] == 'destination_archived'
     request('POST', '/api/v1/events', event, expected=409, token=INGEST, key='archived-event')
     assert request('POST', '/api/v1/events', event, token=INGEST, key='smoke-event-1')['duplicate']
     assert request('POST', f'/api/v1/deliveries/{delivery_id}/replay', key='smoke-replay-1')['duplicate']
     assert 'hooklane_deliveries' in request('GET', '/api/v1/metrics')
-    print('Authenticated API, signed retry, idempotency, pagination, replay, redaction, pause, cancel and archive passed.')
+    print('Authenticated API, safe concurrent edits, signed retry, revision history, idempotency, pagination, replay eligibility, redaction, paused queue, cancel and archive passed.')
 
 
 if __name__ == '__main__':

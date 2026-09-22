@@ -83,6 +83,11 @@ Destination signing secrets are encrypted in PostgreSQL. A destination update
 with a nonempty secret rotates it; an empty/omitted secret retains it. Allow both
 old and new secrets on the receiver while already-claimed requests finish.
 URL changes similarly affect future claims, including queued events and replays.
+Full edits require the destination revision in `If-Match`; reconcile `412`
+conflicts before resubmitting. Use the enabled-only operation for pause/resume so
+an old console view cannot restore old configuration. See the [API contract](api.md#create-a-destination).
+Attempt history retains the revision selected at claim time; pre-upgrade attempts
+show an unknown revision rather than attributing today's settings to old requests.
 
 `ENCRYPTION_KEY` is a data-encryption key, not an access token. Do not regenerate it
 on restart. v1 does not provide in-place master-key rotation. A wrong key keeps
@@ -163,13 +168,31 @@ rollback may require restoring the matching backup and previous application.
 retained events and deliveries per state. Scrape with the admin bearer token over
 HTTPS or a protected internal connection. Gauges describe current retained rows;
 retention makes them decrease, so they are not lifetime counters. `/api/v1/stats`
-backs the console with the same counts.
+backs the console with the same snapshot definitions. Original deliveries and
+replays are separate records. The displayed success rate is succeeded divided by
+succeeded plus dead, excluding cancellations and active work. It covers all
+retained time. A replay can recover an event while its original failed delivery
+remains in this history; follow the recovery and source links during investigation.
+
+Queue diagnostics distinguish paused work waiting for destination resume, due
+eligible work and future scheduled retries. Oldest eligible queued age counts
+seconds since the earliest due time among claimable records, excluding paused,
+archived, redacted or exhausted work. It is zero when nothing is eligible. Watch
+this age alongside the paused backlog and active worker states: a paused queue
+needs an operator action, while a growing eligible age can indicate workers are
+unable to keep up. Metric labels contain fixed state categories, never destination
+URLs, IDs, payloads or error text.
 
 Alert on unready status, growing pending/retrying/dead counts, PostgreSQL disk
 usage and repeated claim/result-persistence warnings. Logs include delivery IDs,
 attempt numbers, status codes and elapsed time, never payloads, receiver bodies,
 signing secrets or database connection strings. Expired claims leave abandoned
 attempts in history; success followed by an unrecorded commit can be duplicated.
+Delivery details link to destination settings and show the effective attempt
+budget, scheduling state and safe failure categories. The [diagnostic code table](api.md#outcomes-and-retries)
+describes DNS, TLS, connection, policy, exhaustion, decryption and interruption
+failures. Correct permanent blockers before replay; redaction and archive cannot
+be repaired by refreshing the console.
 
 Defaults limit each process to four outbound requests and a pool of fourteen
 connections (`WORKER_CONCURRENCY + 10`). Multiple processes can claim safely but

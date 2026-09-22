@@ -101,6 +101,12 @@ allows queued work to proceed. A request already claimed may finish after pause
 or after a URL/secret change. Rotation applies to future claims; coordinate a
 receiver overlap window to tolerate the old secret while requests drain.
 
+Pause/resume changes only the enabled flag. Full configuration edits require the
+revision read by the caller, checked atomically with the update, so a stale editor
+cannot overwrite newer configuration. Attempts record the non-secret destination
+revision selected at claim time. Earlier attempts without this information remain
+explicitly unknown; migration does not invent historical configuration.
+
 Archive is irreversible in v1. It blocks new ingestion and replay, cancels queued
 work, and lets in-flight work finish without scheduling further retries. A new
 destination can be created if needed. Cancel only applies to pending/retrying
@@ -113,6 +119,28 @@ up to 500 per process, on startup and after each one-minute cleanup interval. Ev
 with replay/redaction. Active and paused queued work are retained even past the
 age limit; monitor their disk usage. Idempotency protection ends when the event
 is deleted. Metadata and backups can still be sensitive.
+
+Replay eligibility in read responses describes a consistent metadata snapshot.
+The replay transaction checks eligibility again under locks; a displayed action
+is not a reservation. Permanent payload redaction and destination archive are
+distinguished from a nonterminal source that may become eligible after refresh.
+Successful replay recovery is derived from retained delivery lineage without
+rewriting the source failure or its attempts.
+
+## Operational read models
+
+Overview counts describe retained records across all retained time, not a rolling
+period or lifetime totals. Delivery counts include original deliveries and replays.
+The delivery success rate is succeeded / (succeeded + dead); canceled and active
+work are excluded. A historical dead delivery can therefore coexist with a
+successful recovery. Retention deletes history and can reduce every retained-row
+gauge, including the rows used to calculate this rate.
+
+Queue diagnostics separate paused work from due work eligible for a worker and
+future scheduled retries. The oldest eligible queued age measures time past the
+due schedule for currently eligible work; it excludes paused destinations. These
+aggregates use one database snapshot and bounded metric labels. They do not imply
+a throughput or scheduling SLA.
 
 ## Outbound policy
 
