@@ -1,4 +1,4 @@
-FROM node:24.21.0-alpine AS web-build
+FROM node:26.9.0-alpine AS web-build
 WORKDIR /src/web
 RUN npm install --global pnpm@11.21.0
 COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml web/.npmrc ./
