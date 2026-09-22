@@ -5,11 +5,14 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"io"
 	"log/slog"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"strconv"
 	"sync"
@@ -124,16 +127,7 @@ func (w *Worker) send(ctx context.Context, job *store.Job) (int, time.Duration, 
 	req.Header.Set("X-Hooklane-Event-Type", job.EventType)
 	resp, err := w.client.Do(req)
 	if err != nil {
-		if errors.Is(err, ErrDestinationBlocked) {
-			return 0, 0, "destination_blocked"
-		}
-		if errors.Is(err, context.DeadlineExceeded) {
-			return 0, 0, "timeout"
-		}
-		if errors.Is(err, context.Canceled) {
-			return 0, 0, "interrupted"
-		}
-		return 0, 0, "network_error"
+		return 0, 0, transportErrorCode(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	// Discard a bounded response; receiver data never enters history or logs.
@@ -143,6 +137,45 @@ func (w *Worker) send(ctx context.Context, job *store.Job) (int, time.Duration, 
 		code = ""
 	}
 	return resp.StatusCode, parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()), code
+}
+
+// Classify only known error types, never receiver-controlled strings. The raw
+// transport error can contain the endpoint, certificate, or network addresses.
+func transportErrorCode(err error) string {
+	if errors.Is(err, ErrDestinationBlocked) {
+		return "destination_blocked"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "interrupted"
+	}
+	var networkError net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &networkError) && networkError.Timeout()) {
+		return "timeout"
+	}
+	var dnsError *net.DNSError
+	if errors.Is(err, errDestinationDNS) || errors.As(err, &dnsError) {
+		return "dns_error"
+	}
+	var certificateError *tls.CertificateVerificationError
+	var unknownAuthority x509.UnknownAuthorityError
+	var hostnameError x509.HostnameError
+	var invalidCertificate x509.CertificateInvalidError
+	var recordError tls.RecordHeaderError
+	var alertError tls.AlertError
+	if errors.As(err, &certificateError) || errors.As(err, &unknownAuthority) || errors.As(err, &hostnameError) || errors.As(err, &invalidCertificate) || errors.As(err, &recordError) || errors.As(err, &alertError) {
+		return "tls_error"
+	}
+	var socketError *net.OpError
+	if errors.Is(err, errDestinationConnection) {
+		return "connection_error"
+	}
+	if errors.As(err, &socketError) {
+		switch socketError.Op {
+		case "dial", "read", "write":
+			return "connection_error"
+		}
+	}
+	return "network_error"
 }
 
 // Signature authenticates the exact payload and stable event identity. Receivers

@@ -15,6 +15,11 @@ import (
 
 var ErrDestinationBlocked = errors.New("destination blocked by outbound policy")
 
+var (
+	errDestinationDNS        = errors.New("destination DNS resolution failed")
+	errDestinationConnection = errors.New("destination connection failed")
+)
+
 // Policy validates both submitted URLs and every freshly resolved socket address.
 // Private destinations require explicit CIDRs. Metadata/link-local addresses are
 // always blocked, even if an operator supplies an overly broad allowlist.
@@ -102,8 +107,11 @@ func (p Policy) resolve(ctx context.Context, host string) ([]netip.Addr, error) 
 		resolver = net.DefaultResolver
 	}
 	ips, err := resolver.LookupNetIP(ctx, "ip", host)
-	if err != nil || len(ips) == 0 {
-		return nil, errors.New("destination DNS resolution failed")
+	if err != nil {
+		return nil, safeNetworkError(err, errDestinationDNS)
+	}
+	if len(ips) == 0 {
+		return nil, errDestinationDNS
 	}
 	for _, ip := range ips {
 		if !p.allowed(ip) {
@@ -123,6 +131,7 @@ func (p Policy) dial(ctx context.Context, network, address string) (net.Conn, er
 		return nil, err
 	}
 	dialer := net.Dialer{Timeout: 3 * time.Second, KeepAlive: 30 * time.Second}
+	lastErr := errDestinationConnection
 	for _, ip := range ips {
 		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
 		if err == nil {
@@ -131,8 +140,22 @@ func (p Policy) dial(ctx context.Context, network, address string) (net.Conn, er
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		lastErr = safeNetworkError(err, errDestinationConnection)
 	}
-	return nil, errors.New("destination connection failed")
+	return nil, lastErr
+}
+
+// Keep cancellation/deadline semantics without retaining hostnames, addresses,
+// or platform error text from the resolver or socket dialer.
+func safeNetworkError(err, fallback error) error {
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	var networkError net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &networkError) && networkError.Timeout()) {
+		return context.DeadlineExceeded
+	}
+	return fallback
 }
 
 func (p Policy) client(timeout time.Duration) *http.Client {

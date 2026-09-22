@@ -1,12 +1,17 @@
 package delivery
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"io"
+	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -128,6 +133,129 @@ func TestTimeoutPersistsSafeRetryWithoutReceiverContents(t *testing.T) {
 	worker.deliver(context.Background(), testJob(receiver.URL+"/private-token"))
 	if s.result.Status != "retrying" || s.result.ErrorCode != "timeout" || strings.Contains(s.result.ErrorCode, "token") {
 		t.Fatalf("incorrect timeout result %+v", s.result)
+	}
+}
+
+type failingResolver struct{ err error }
+
+func (r failingResolver) LookupNetIP(context.Context, string, string) ([]netip.Addr, error) {
+	return nil, r.err
+}
+
+func TestDNSFailuresPersistSafeRetry(t *testing.T) {
+	for name, resolverError := range map[string]error{
+		"lookup failure": &net.DNSError{Name: "sensitive-host.example", Server: "192.0.2.123", Err: "private resolver details"},
+		"no answers":     nil,
+		"timeout":        &net.DNSError{Name: "sensitive-host.example", IsTimeout: true},
+		"canceled":       context.Canceled,
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := &recordingStore{}
+			worker := testWorker(s)
+			worker.policy.resolver = failingResolver{err: resolverError}
+			worker.client = worker.policy.client(worker.cfg.Timeout)
+			defer worker.client.CloseIdleConnections()
+			var logs bytes.Buffer
+			worker.logger = slog.New(slog.NewTextHandler(&logs, nil))
+			worker.deliver(context.Background(), testJob("https://sensitive-host.example/private-endpoint"))
+			want := "dns_error"
+			if name == "timeout" {
+				want = "timeout"
+			}
+			if name == "canceled" {
+				want = "interrupted"
+			}
+			if s.result.ErrorCode != want || s.result.Status != "retrying" || s.result.NextAttemptAt == nil || s.result.StatusCode != 0 {
+				t.Fatalf("incorrect DNS failure result %+v", s.result)
+			}
+			for _, sensitive := range []string{"sensitive-host", "192.0.2.123", "private resolver", "private-endpoint", "test-secret-for-receiver-verification"} {
+				if strings.Contains(logs.String(), sensitive) {
+					t.Fatalf("transport details leaked to logs: %q", sensitive)
+				}
+			}
+		})
+	}
+}
+
+func TestBlockedDNSDestinationIsTerminal(t *testing.T) {
+	s := &recordingStore{}
+	worker := testWorker(s)
+	worker.policy.resolver = &testResolver{answers: [][]netip.Addr{{netip.MustParseAddr("169.254.169.254")}}}
+	worker.client = worker.policy.client(worker.cfg.Timeout)
+	defer worker.client.CloseIdleConnections()
+	worker.deliver(context.Background(), testJob("https://example.com/webhook"))
+	if s.result.ErrorCode != "destination_blocked" || s.result.Status != "dead" || s.result.NextAttemptAt != nil {
+		t.Fatalf("policy rejection was confused with a retryable DNS failure %+v", s.result)
+	}
+}
+
+func TestTLSCertificateFailurePersistsSafeRetryAndExhaustion(t *testing.T) {
+	var hits atomic.Int32
+	receiver := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits.Add(1) }))
+	receiver.Config.ErrorLog = log.New(io.Discard, "", 0)
+	receiver.StartTLS()
+	defer receiver.Close()
+	s := &recordingStore{}
+	worker := testWorker(s)
+	defer worker.client.CloseIdleConnections()
+	job := testJob(receiver.URL)
+	worker.deliver(context.Background(), job)
+	if hits.Load() != 0 || s.result.ErrorCode != "tls_error" || s.result.Status != "retrying" || s.result.NextAttemptAt == nil {
+		t.Fatalf("incorrect TLS failure result %+v", s.result)
+	}
+	job.AttemptNumber = worker.cfg.MaxAttempts
+	worker.deliver(context.Background(), job)
+	if s.result.ErrorCode != "tls_error" || s.result.Status != "dead" || s.result.NextAttemptAt != nil {
+		t.Fatalf("TLS failure did not exhaust the attempt budget %+v", s.result)
+	}
+}
+
+func TestConnectionFailurePersistsSafeRetry(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s := &recordingStore{}
+	worker := testWorker(s)
+	defer worker.client.CloseIdleConnections()
+	worker.deliver(context.Background(), testJob("http://"+address+"/private-endpoint"))
+	if s.result.ErrorCode != "connection_error" || s.result.Status != "retrying" || s.result.NextAttemptAt == nil {
+		t.Fatalf("incorrect connection failure result %+v", s.result)
+	}
+}
+
+type errorTransport struct{ err error }
+
+func (transport errorTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, transport.err
+}
+
+func TestTransportClassificationPreservesPolicyAndUnknownErrors(t *testing.T) {
+	for _, tt := range []struct {
+		name, code, status string
+		err                error
+	}{
+		{"policy", "destination_blocked", "dead", ErrDestinationBlocked},
+		{"cancellation", "interrupted", "retrying", context.Canceled},
+		{"socket read timeout", "timeout", "retrying", &net.OpError{Op: "read", Net: "tcp", Err: context.DeadlineExceeded}},
+		{"socket read failure", "connection_error", "retrying", &net.OpError{Op: "read", Net: "tcp", Err: errors.New("private socket details")}},
+		{"TLS record", "tls_error", "retrying", tls.RecordHeaderError{Msg: "private record details"}},
+		{"TLS alert", "tls_error", "retrying", tls.AlertError(40)},
+		{"unknown", "network_error", "retrying", errors.New("tls: receiver-controlled string is not a typed TLS error")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &recordingStore{}
+			worker := testWorker(s)
+			worker.client.Transport = errorTransport{err: tt.err}
+			worker.deliver(context.Background(), testJob("https://example.com/private-endpoint"))
+			if s.result.ErrorCode != tt.code || s.result.Status != tt.status || (s.result.NextAttemptAt != nil) != (tt.status == "retrying") {
+				t.Fatalf("incorrect transport failure result %+v", s.result)
+			}
+		})
 	}
 }
 
