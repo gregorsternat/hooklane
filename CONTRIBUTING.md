@@ -1,7 +1,7 @@
 # Contributing
 
-Hooklane is at the foundation stage. Start with the [README](README.md) for setup
-and the [roadmap](docs/roadmap.md) for upcoming work.
+Hooklane v1 implements a single-team webhook delivery service. Start with the
+[README](README.md) for setup and the [roadmap](docs/roadmap.md) for boundaries.
 
 ## Workflow
 
@@ -20,8 +20,10 @@ in Git; build outputs and secrets do not. New dependencies need a concrete use.
 
 Tests should cover observable behavior and meaningful failures. Go tests live
 beside the code and use the standard testing package. Frontend tests use Vitest
-and Testing Library. Database behavior must eventually be checked against real
-PostgreSQL, not only mocks.
+and Testing Library. Database changes must run through `make integration` against a disposable real
+PostgreSQL database, not only mocks. Set `HOOKLANE_TEST_DATABASE_URL`; tests create
+and clean isolated schemas. Run `make generate` after changing SQL queries and
+commit the generated files.
 
 ## AI-assisted contributions
 

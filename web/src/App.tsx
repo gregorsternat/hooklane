@@ -1,103 +1,295 @@
-import { useEffect, useState } from 'react';
-
-type Status = 'checking' | 'ready' | 'unavailable' | 'unreachable';
-
-const messages: Record<Status, { title: string; detail: string }> = {
-  checking: {
-    title: 'Checking connection',
-    detail: 'Connecting to the application and database…',
-  },
-  ready: {
-    title: 'Connected',
-    detail: 'The application and PostgreSQL are ready.',
-  },
-  unavailable: {
-    title: 'Database unavailable',
-    detail: 'The application is reachable. PostgreSQL is not ready yet.',
-  },
-  unreachable: {
-    title: 'Unable to connect',
-    detail: 'The application did not return a valid readiness response.',
-  },
-};
-
-async function checkReadiness(signal: AbortSignal): Promise<Status> {
-  const response = await fetch('/readyz', { signal, cache: 'no-store' });
-  const data: unknown = await response.json();
-  if (typeof data !== 'object' || data === null || !('status' in data)) {
-    throw new Error('Invalid readiness response');
-  }
-  if (response.status === 200 && data.status === 'ok') return 'ready';
-  if (response.status === 503 && data.status === 'unavailable')
-    return 'unavailable';
-  throw new Error('Unexpected readiness response');
-}
+import { lazy, Suspense, useEffect, useState } from 'react';
+import type { FormEvent } from 'react';
+import { Menu } from 'lucide-react';
+import { APIError, noContent, request, session } from './api';
+import {
+  Brand,
+  Button,
+  ButtonLink,
+  ErrorBox,
+  Icon,
+  Input,
+  Loading,
+} from './components';
+import {
+  AnimatedSidebarProvider,
+  AnimatedSidebar,
+  AnimatedSidebarHeader,
+  AnimatedSidebarContent,
+  AnimatedSidebarFooter,
+  AnimatedSidebarMenu,
+  AnimatedSidebarMenuItem,
+  AnimatedSidebarMenuButton,
+  AnimatedSidebarTrigger,
+  AnimatedSidebarInset,
+} from '@/components/motion/animated-sidebar';
+import {
+  AnimatedToastStack,
+  useAnimatedToastStack,
+} from '@/components/motion/animated-toast-stack';
+import { useMutation, useRoute } from './hooks';
+const Dashboard = lazy(() =>
+  import('./pages').then((module) => ({ default: module.Dashboard })),
+);
+const Destinations = lazy(() =>
+  import('./pages').then((module) => ({ default: module.Destinations })),
+);
+const Events = lazy(() =>
+  import('./pages').then((module) => ({ default: module.Events })),
+);
+const EventView = lazy(() =>
+  import('./pages').then((module) => ({ default: module.EventView })),
+);
+const Deliveries = lazy(() =>
+  import('./pages').then((module) => ({ default: module.Deliveries })),
+);
+const DeliveryView = lazy(() =>
+  import('./pages').then((module) => ({ default: module.DeliveryView })),
+);
+const Guide = lazy(() =>
+  import('./pages').then((module) => ({ default: module.Guide })),
+);
 
 export function App() {
-  const [status, setStatus] = useState<Status>('checking');
-  const [attempt, setAttempt] = useState(0);
-
+  const [auth, setAuth] = useState<
+    'checking' | 'signed-in' | 'signed-out' | 'error'
+  >('checking');
+  const [error, setError] = useState('');
+  const [revision, setRevision] = useState(0);
   useEffect(() => {
     const controller = new AbortController();
-    // Bound the browser request as well as the server-side database probe.
-    const timeout = window.setTimeout(() => controller.abort(), 5000);
-    let active = true;
-    void checkReadiness(controller.signal)
-      .then((next) => {
-        if (active) setStatus(next);
+    void request('/session', session, { signal: controller.signal })
+      .then(() => {
+        if (!controller.signal.aborted) setAuth('signed-in');
       })
-      .catch(() => {
-        if (active) setStatus('unreachable');
-      })
-      .finally(() => window.clearTimeout(timeout));
+      .catch((problem: unknown) => {
+        if (controller.signal.aborted) return;
+        if (problem instanceof APIError && problem.status === 401)
+          setAuth('signed-out');
+        else {
+          setError(
+            problem instanceof Error
+              ? problem.message
+              : 'Unable to reach Hooklane.',
+          );
+          setAuth('error');
+        }
+      });
+    const unauthorized = () => setAuth('signed-out');
+    window.addEventListener('hooklane:unauthorized', unauthorized);
     return () => {
-      active = false;
-      window.clearTimeout(timeout);
       controller.abort();
+      window.removeEventListener('hooklane:unauthorized', unauthorized);
     };
-  }, [attempt]);
-
+  }, [revision]);
+  if (auth === 'checking')
+    return (
+      <div className="boot">
+        <Brand dark />
+        <Loading label="Connecting…" />
+      </div>
+    );
+  if (auth !== 'signed-in')
+    return (
+      <Login
+        onLogin={() => setAuth('signed-in')}
+        connectionError={auth === 'error' ? error : ''}
+        onRetry={() => {
+          setAuth('checking');
+          setRevision((n) => n + 1);
+        }}
+      />
+    );
+  return <Workspace onLogout={() => setAuth('signed-out')} />;
+}
+function Login({
+  onLogin,
+  connectionError,
+  onRetry,
+}: {
+  onLogin: () => void;
+  connectionError: string;
+  onRetry: () => void;
+}) {
+  const [token, setToken] = useState('');
+  const mutation = useMutation();
+  async function submit(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const result = await mutation.run((signal) =>
+      request('/session', session, {
+        method: 'POST',
+        body: JSON.stringify({ token }),
+        signal,
+      }),
+    );
+    setToken('');
+    if (result) onLogin();
+  }
   return (
-    <main className="shell">
-      <header className="brand">
-        <span className="brand-mark" aria-hidden="true">
-          ↗
-        </span>{' '}
-        Hooklane
-      </header>
-      <section className="intro" aria-labelledby="title">
-        <p className="eyebrow">Self-hosted · Open source</p>
-        <h1 id="title">
-          A reliable home
-          <br />
-          for your webhooks.
-        </h1>
-        <p className="description">
-          Webhook delivery and replay, under your control.
-        </p>
+    <main className="login-layout">
+      <section className="login-card">
+        <Brand dark />
+        <h1>Sign in</h1>
+        <ErrorBox message={connectionError} retry={onRetry} />
+        <form onSubmit={(e) => void submit(e)}>
+          <label htmlFor="admin-token">Admin token</label>
+          <Input
+            id="admin-token"
+            type="password"
+            value={token}
+            onChange={setToken}
+            required
+            autoComplete="current-password"
+            autoFocus
+            disabled={mutation.pending}
+          />
+          <ErrorBox
+            message={
+              mutation.error
+                ? 'Sign-in failed. Check your token and connection.'
+                : ''
+            }
+          />
+          <Button
+            type="submit"
+            className="button primary full-width"
+            disabled={mutation.pending}
+          >
+            {mutation.pending ? 'Signing in…' : 'Sign in'}
+          </Button>
+        </form>
       </section>
-      <section className="connection" aria-labelledby="connection-title">
-        <div role="status" aria-live="polite" className="connection-status">
-          <span className={`status-dot ${status}`} aria-hidden="true" />
-          <div>
-            <h2 id="connection-title">{messages[status].title}</h2>
-            <p>{messages[status].detail}</p>
-          </div>
-        </div>
-        <button
-          type="button"
-          disabled={status === 'checking'}
-          onClick={() => {
-            setStatus('checking');
-            setAttempt((current) => current + 1);
-          }}
-        >
-          Check again <span aria-hidden="true">↻</span>
-        </button>
-      </section>
-      <footer>
-        Early development. Webhook delivery and replay are not available yet.
-      </footer>
     </main>
+  );
+}
+
+function Workspace({ onLogout }: { onLogout: () => void }) {
+  const route = useRoute();
+  const pathname = route.split('?')[0] ?? '/';
+  const section = pathname.split('/')[1] || 'overview';
+  const id = pathname.split('/')[2];
+  const logout = useMutation();
+  const { toasts, showToast, dismissToast } = useAnimatedToastStack({
+    defaultDuration: 7000,
+    limit: 3,
+  });
+  const notify = (title: string) => {
+    showToast({ title, status: 'success' });
+  };
+  const links = [
+    { path: '/', name: 'Overview', icon: 'overview' },
+    { path: '/destinations', name: 'Destinations', icon: 'destinations' },
+    { path: '/events', name: 'Events', icon: 'events' },
+    { path: '/deliveries', name: 'Deliveries', icon: 'deliveries' },
+  ] as const;
+  async function signOut() {
+    const completed = await logout.run(async (signal) => {
+      await request('/session', noContent, { method: 'DELETE', signal });
+      return true;
+    });
+    if (completed) onLogout();
+  }
+  let page;
+  if (section === 'overview') page = <Dashboard />;
+  else if (section === 'destinations') page = <Destinations notify={notify} />;
+  else if (section === 'events' && id)
+    page = <EventView id={id} notify={notify} />;
+  else if (section === 'events') page = <Events notify={notify} />;
+  else if (section === 'deliveries' && id)
+    page = <DeliveryView id={id} notify={notify} />;
+  else if (section === 'deliveries') page = <Deliveries />;
+  else if (section === 'guide') page = <Guide />;
+  else
+    page = (
+      <div className="not-found">
+        <h1>Page not found</h1>
+        <ButtonLink className="button" href="#/">
+          Go to overview
+        </ButtonLink>
+      </div>
+    );
+  return (
+    <AnimatedSidebarProvider
+      className="app-layout"
+      style={{ '--sidebar-width': '240px' }}
+    >
+      <a
+        className="skip-link"
+        href="#main-content"
+        onClick={(e) => {
+          e.preventDefault();
+          document.getElementById('main-content')?.focus();
+        }}
+      >
+        Skip to content
+      </a>
+      <AnimatedSidebar
+        className="app-sidebar"
+        collapsible="none"
+        ariaLabel="Main navigation"
+      >
+        <AnimatedSidebarHeader>
+          <Brand dark />
+        </AnimatedSidebarHeader>
+        <AnimatedSidebarContent>
+          <nav aria-label="Main navigation">
+            <AnimatedSidebarMenu>
+              {links.map((link) => (
+                <AnimatedSidebarMenuItem key={link.path}>
+                  <AnimatedSidebarMenuButton
+                    href={`#${link.path}`}
+                    icon={<Icon name={link.icon} />}
+                    isActive={section === (link.path.slice(1) || 'overview')}
+                  >
+                    {link.name}
+                  </AnimatedSidebarMenuButton>
+                </AnimatedSidebarMenuItem>
+              ))}
+            </AnimatedSidebarMenu>
+          </nav>
+        </AnimatedSidebarContent>
+        <AnimatedSidebarFooter>
+          <AnimatedSidebarMenu>
+            <AnimatedSidebarMenuItem>
+              <AnimatedSidebarMenuButton
+                href="#/guide"
+                icon={<Icon name="guide" />}
+                isActive={section === 'guide'}
+              >
+                Integration guide
+              </AnimatedSidebarMenuButton>
+            </AnimatedSidebarMenuItem>
+            <AnimatedSidebarMenuItem>
+              <AnimatedSidebarMenuButton
+                icon={<Icon name="logout" />}
+                disabled={logout.pending}
+                onSelect={() => void signOut()}
+              >
+                {logout.pending ? 'Signing out…' : 'Sign out'}
+              </AnimatedSidebarMenuButton>
+            </AnimatedSidebarMenuItem>
+          </AnimatedSidebarMenu>
+        </AnimatedSidebarFooter>
+      </AnimatedSidebar>
+      <AnimatedSidebarInset className="main-shell">
+        <div className="mobile-toolbar">
+          <AnimatedSidebarTrigger aria-label="Open navigation">
+            <Menu size={20} aria-hidden="true" />
+          </AnimatedSidebarTrigger>
+          <Brand dark />
+        </div>
+        <div id="main-content" tabIndex={-1}>
+          <ErrorBox message={logout.error} />
+          <Suspense fallback={<Loading />}>
+            <div key={route}>{page}</div>
+          </Suspense>
+        </div>
+      </AnimatedSidebarInset>
+      <AnimatedToastStack
+        toasts={toasts}
+        onDismiss={dismissToast}
+        placement="fixed"
+      />
+    </AnimatedSidebarProvider>
   );
 }

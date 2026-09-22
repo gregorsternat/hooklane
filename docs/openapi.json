@@ -1,0 +1,1685 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Hooklane API",
+    "version": "1.0.0",
+    "license": {
+      "name": "Apache-2.0",
+      "identifier": "Apache-2.0"
+    },
+    "description": "Single-team, self-hosted webhook delivery and replay. All management routes require the administrator bearer token or a signed browser session; only event ingestion accepts the optional ingest-only bearer token. Cookie-authenticated mutations must send an Origin exactly matching the public application origin. All /api/ responses use Cache-Control: no-store. JSON input objects reject unknown fields. API operations have an eight-second server context deadline. Responses contain metadata and safe error codes, never payloads, receiver response bodies, tokens, or signing secrets. UTF-8 byte limits described in schemas are authoritative when they differ from JSON Schema character counts."
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "Same-origin self-hosted installation."
+    }
+  ],
+  "tags": [
+    {
+      "name": "Session"
+    },
+    {
+      "name": "Destinations"
+    },
+    {
+      "name": "Events"
+    },
+    {
+      "name": "Deliveries"
+    },
+    {
+      "name": "Operations"
+    }
+  ],
+  "security": [
+    {
+      "AdminBearer": []
+    },
+    {
+      "SessionCookie": []
+    }
+  ],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "operationId": "getLiveness",
+        "summary": "Check process liveness",
+        "tags": [
+          "Operations"
+        ],
+        "responses": {
+          "200": {
+            "description": "The HTTP process is serving.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          }
+        },
+        "description": "Unauthenticated liveness. Does not contact PostgreSQL.",
+        "security": []
+      }
+    },
+    "/readyz": {
+      "get": {
+        "operationId": "getReadiness",
+        "summary": "Check application readiness",
+        "tags": [
+          "Operations"
+        ],
+        "responses": {
+          "200": {
+            "description": "Application initialization succeeded and PostgreSQL responds within the readiness deadline.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Initialization or PostgreSQL is unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/session": {
+      "post": {
+        "operationId": "createSession",
+        "summary": "Sign in to the management UI",
+        "tags": [
+          "Session"
+        ],
+        "responses": {
+          "200": {
+            "description": "Authenticated. Sets a signed, HttpOnly, SameSite=Strict cookie valid for 12 hours.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            },
+            "headers": {
+              "Set-Cookie": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "hooklane_session cookie. Secure is enabled when configured for HTTPS."
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error429"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "description": "Request body is limited to 4096 bytes. The per-process login limiter allows a burst of 10 attempts and replenishes one attempt every six seconds. When an Origin header is supplied, it must match the application origin. Session endpoints remain available while database initialization retries.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Login"
+              }
+            }
+          }
+        },
+        "security": []
+      },
+      "get": {
+        "operationId": "getSession",
+        "summary": "Check the current management session",
+        "tags": [
+          "Session"
+        ],
+        "responses": {
+          "200": {
+            "description": "Authenticated with an administrator bearer token or valid session cookie.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteSession",
+        "summary": "Clear the browser session cookie",
+        "tags": [
+          "Session"
+        ],
+        "responses": {
+          "204": {
+            "description": "Session cookie expired in the response."
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "description": "Cookie-authenticated requests require a same-origin Origin header. This clears the current browser cookie; it does not revoke previously copied signed cookies. Administrator-token rotation invalidates every session."
+      }
+    },
+    "/api/v1/destinations": {
+      "post": {
+        "operationId": "createDestination",
+        "summary": "Create a delivery destination",
+        "tags": [
+          "Destinations"
+        ],
+        "responses": {
+          "201": {
+            "description": "Destination created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Destination"
+                }
+              }
+            },
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "API path of the created destination."
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "description": "The request is capped at 16 KiB. Destination DNS and network policy are validated before acceptance and again on every outbound connection.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateDestination"
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "listDestinations",
+        "summary": "List destinations",
+        "tags": [
+          "Destinations"
+        ],
+        "responses": {
+          "200": {
+            "description": "Destinations in descending identifier order, including archived records.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DestinationPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Before"
+          }
+        ]
+      }
+    },
+    "/api/v1/destinations/{id}": {
+      "get": {
+        "operationId": "getDestination",
+        "summary": "Inspect a destination",
+        "tags": [
+          "Destinations"
+        ],
+        "responses": {
+          "200": {
+            "description": "Destination metadata. Signing secrets are never returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Destination"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ResourceID"
+          }
+        ]
+      },
+      "put": {
+        "operationId": "updateDestination",
+        "summary": "Update, pause, resume, or rotate a destination secret",
+        "tags": [
+          "Destinations"
+        ],
+        "responses": {
+          "200": {
+            "description": "Updated destination metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Destination"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "description": "Requires name and url. Omitted enabled preserves its current value. Omitted or empty signing_secret preserves its current value. Pausing stops future claims and still accepts ingestion. An already claimed attempt can finish. Archived destinations cannot be edited. Request maximum: 16 KiB. DNS/network validation runs only when url changes, so an unchanged destination remains editable during a DNS outage.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateDestination"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ResourceID"
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "archiveDestination",
+        "summary": "Archive a destination",
+        "tags": [
+          "Destinations"
+        ],
+        "responses": {
+          "204": {
+            "description": "Destination archived; pending and retrying deliveries canceled."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "description": "Idempotent archival preserves history, blocks new ingestion and replay work, and prevents future claims. Matching already-committed ingestion/replay keys still return their existing work. In-flight attempts may finish; a failed in-flight attempt will not schedule a new retry.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ResourceID"
+          }
+        ]
+      }
+    },
+    "/api/v1/events": {
+      "post": {
+        "operationId": "ingestEvent",
+        "summary": "Persist an event and its initial delivery atomically",
+        "tags": [
+          "Events"
+        ],
+        "responses": {
+          "202": {
+            "description": "Event and delivery committed atomically; delivery is asynchronous.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestResult"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "The same idempotent event was already committed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "description": "Accepts the administrator bearer token, optional ingest-only bearer token, or an administrator session cookie. Idempotency is scoped to destination and exact raw JSON payload bytes plus event type. Reusing a key with different bytes or type returns 409. The deduplication record lasts while the event is retained. Paused destinations accept events; archived destinations return 409 for new keys, while an already committed matching key still returns its existing event and delivery. Delivery is at least once, so receivers must deduplicate the stable event identifier.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IngestEvent"
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "security": [
+          {
+            "AdminBearer": []
+          },
+          {
+            "IngestBearer": []
+          },
+          {
+            "SessionCookie": []
+          }
+        ]
+      },
+      "get": {
+        "operationId": "listEvents",
+        "summary": "List retained event metadata",
+        "tags": [
+          "Events"
+        ],
+        "responses": {
+          "200": {
+            "description": "Metadata only; event payloads are never returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Before"
+          },
+          {
+            "name": "destination_id",
+            "in": "query",
+            "required": false,
+            "description": "Filter by destination identifier.",
+            "schema": {
+              "type": "string",
+              "pattern": "^(dst|evt|dlv)_[0-9a-f]{36}$",
+              "minLength": 40,
+              "maxLength": 40,
+              "description": "Opaque, time-prefixed sortable identifier. Preserve and return it unchanged."
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "required": false,
+            "description": "Exact event type filter, at most 120 UTF-8 bytes with no Unicode control characters.",
+            "schema": {
+              "type": "string",
+              "maxLength": 120
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/events/{id}": {
+      "get": {
+        "operationId": "getEvent",
+        "summary": "Inspect an event and its recent delivery lineage",
+        "tags": [
+          "Events"
+        ],
+        "responses": {
+          "200": {
+            "description": "Event metadata and up to 100 newest deliveries.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ResourceID"
+          }
+        ]
+      }
+    },
+    "/api/v1/events/{id}/payload": {
+      "delete": {
+        "operationId": "redactEventPayload",
+        "summary": "Permanently redact a retained event payload",
+        "tags": [
+          "Events"
+        ],
+        "responses": {
+          "204": {
+            "description": "Payload removed; event metadata, digest, deliveries, and attempts preserved."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "description": "Allowed only when all deliveries for the event are terminal (succeeded, dead, or canceled). Repeated redaction succeeds. New replay requests fail once the payload has been redacted.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ResourceID"
+          }
+        ]
+      }
+    },
+    "/api/v1/deliveries": {
+      "get": {
+        "operationId": "listDeliveries",
+        "summary": "List delivery records",
+        "tags": [
+          "Deliveries"
+        ],
+        "responses": {
+          "200": {
+            "description": "Deliveries in descending identifier order.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeliveryPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Before"
+          },
+          {
+            "name": "destination_id",
+            "in": "query",
+            "required": false,
+            "description": "Filter by destination identifier.",
+            "schema": {
+              "type": "string",
+              "pattern": "^(dst|evt|dlv)_[0-9a-f]{36}$",
+              "minLength": 40,
+              "maxLength": 40,
+              "description": "Opaque, time-prefixed sortable identifier. Preserve and return it unchanged."
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "query",
+            "required": false,
+            "description": "Filter by event identifier, including all of its replay deliveries.",
+            "schema": {
+              "type": "string",
+              "pattern": "^(dst|evt|dlv)_[0-9a-f]{36}$",
+              "minLength": 40,
+              "maxLength": 40,
+              "description": "Opaque, time-prefixed sortable identifier. Preserve and return it unchanged."
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "description": "Filter by the current delivery state.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "retrying",
+                "delivering",
+                "succeeded",
+                "dead",
+                "canceled"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/deliveries/{id}": {
+      "get": {
+        "operationId": "getDelivery",
+        "summary": "Inspect a delivery and its complete attempt history",
+        "tags": [
+          "Deliveries"
+        ],
+        "responses": {
+          "200": {
+            "description": "Delivery metadata and persisted attempt outcomes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeliveryDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ResourceID"
+          }
+        ]
+      }
+    },
+    "/api/v1/deliveries/{id}/replay": {
+      "post": {
+        "operationId": "replayDelivery",
+        "summary": "Create a new delivery from a terminal delivery",
+        "tags": [
+          "Deliveries"
+        ],
+        "responses": {
+          "202": {
+            "description": "Replay work committed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplayResult"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "This replay idempotency key was already accepted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplayResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "description": "No body is required. The original must be succeeded, dead, or canceled, with a retained payload and a non-archived destination. A paused destination may queue a replay. Creates a fresh delivery with attempt_count zero and replay_of referencing the requested original; original attempts remain unchanged. Idempotency is scoped to the original delivery and key. An already accepted replay key returns its existing work even after payload redaction or destination archival, without creating new work.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ResourceID"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ]
+      }
+    },
+    "/api/v1/deliveries/{id}/cancel": {
+      "post": {
+        "operationId": "cancelDelivery",
+        "summary": "Cancel pending or retrying work",
+        "tags": [
+          "Deliveries"
+        ],
+        "responses": {
+          "204": {
+            "description": "Delivery canceled, or it was already canceled."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "description": "No body is required. Delivering, succeeded, and dead deliveries return 409. Cancellation preserves history and makes the delivery terminal.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ResourceID"
+          }
+        ]
+      }
+    },
+    "/api/v1/stats": {
+      "get": {
+        "operationId": "getStats",
+        "summary": "Read retained installation counts",
+        "tags": [
+          "Operations"
+        ],
+        "responses": {
+          "200": {
+            "description": "Destination count excludes archived destinations; event and delivery counts cover retained records only.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Stats"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        }
+      }
+    },
+    "/api/v1/metrics": {
+      "get": {
+        "operationId": "getMetrics",
+        "summary": "Read Prometheus gauge metrics",
+        "tags": [
+          "Operations"
+        ],
+        "responses": {
+          "200": {
+            "description": "Current retained-state gauges: hooklane_destinations, hooklane_events, and hooklane_deliveries{status=\"...\"}. These are current counts, not lifetime throughput counters.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "# HELP hooklane_events Retained event metadata records.\n# TYPE hooklane_events gauge\nhooklane_events 42\n"
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "AdminBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Installation ADMIN_TOKEN. Full management and ingestion access."
+      },
+      "IngestBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Optional installation INGEST_TOKEN. Only POST /api/v1/events accepts this token."
+      },
+      "SessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "hooklane_session",
+        "description": "Signed HttpOnly, SameSite=Strict cookie from POST /api/v1/session. Valid for 12 hours. Cookie mutations additionally require the matching Origin header."
+      }
+    },
+    "parameters": {
+      "ResourceID": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/ResourceID"
+        }
+      },
+      "Limit": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "description": "Maximum returned items (default 25, maximum 100).",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 25
+        }
+      },
+      "Before": {
+        "name": "before",
+        "in": "query",
+        "required": false,
+        "description": "Opaque next_cursor from the preceding response. Results are sorted by descending identifier.",
+        "schema": {
+          "$ref": "#/components/schemas/ResourceID"
+        }
+      },
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": true,
+        "description": "Stable operation key, 1–128 visible ASCII characters (no spaces). Reuse the same key when a request times out or its outcome is uncertain.",
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[!-~]+$"
+        }
+      }
+    },
+    "schemas": {
+      "ResourceID": {
+        "type": "string",
+        "pattern": "^(dst|evt|dlv)_[0-9a-f]{36}$",
+        "minLength": 40,
+        "maxLength": 40,
+        "description": "Opaque, time-prefixed sortable identifier. Preserve and return it unchanged."
+      },
+      "Error": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "type": "string",
+                "description": "Stable machine-readable error code."
+              },
+              "message": {
+                "type": "string",
+                "description": "Safe human-readable explanation; never contains driver errors, payloads, credentials, or secrets."
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ]
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "Destination": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/ResourceID"
+          },
+          "name": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "archived": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "url",
+          "enabled",
+          "archived",
+          "created_at",
+          "updated_at"
+        ]
+      },
+      "CreateDestination": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120,
+            "description": "Trimmed name, 1–120 UTF-8 bytes, with no Unicode control characters."
+          },
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "maxLength": 2048,
+            "description": "HTTP(S) URL of at most 2048 bytes; userinfo, query strings (including a bare ?), and fragments are forbidden. HTTPS and publicly routable resolved addresses are required unless the installation explicitly allows HTTP/private networks. Redirects are never followed."
+          },
+          "signing_secret": {
+            "type": "string",
+            "minLength": 32,
+            "maxLength": 512,
+            "writeOnly": true,
+            "description": "32–512 UTF-8 bytes without control characters. Encrypted at rest; never returned by the API. Keep the receiver configured with this same secret."
+          },
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          }
+        },
+        "required": [
+          "name",
+          "url",
+          "signing_secret"
+        ]
+      },
+      "UpdateDestination": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120,
+            "description": "Trimmed name, 1–120 UTF-8 bytes, with no Unicode control characters."
+          },
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "maxLength": 2048,
+            "description": "HTTP(S) URL of at most 2048 bytes; userinfo, query strings (including a bare ?), and fragments are forbidden. HTTPS and publicly routable resolved addresses are required unless the installation explicitly allows HTTP/private networks. Redirects are never followed."
+          },
+          "signing_secret": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 32,
+                "maxLength": 512,
+                "writeOnly": true,
+                "description": "32–512 UTF-8 bytes without control characters. Encrypted at rest; never returned by the API. Keep the receiver configured with this same secret."
+              },
+              {
+                "type": "string",
+                "const": ""
+              }
+            ],
+            "description": "Omit or send an empty string to keep the existing secret. A nonempty value rotates the signing secret for future claims."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Omit to preserve the current value. false pauses claims while ingestion remains available."
+          }
+        },
+        "required": [
+          "name",
+          "url"
+        ]
+      },
+      "Event": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/ResourceID"
+          },
+          "destination_id": {
+            "$ref": "#/components/schemas/ResourceID"
+          },
+          "type": {
+            "type": "string"
+          },
+          "payload_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "payload_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "SHA-256 digest of the exact stored raw JSON value bytes; retained after redaction."
+          },
+          "redacted": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "destination_id",
+          "type",
+          "payload_bytes",
+          "payload_sha256",
+          "redacted",
+          "created_at"
+        ]
+      },
+      "Delivery": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/ResourceID"
+          },
+          "event_id": {
+            "$ref": "#/components/schemas/ResourceID"
+          },
+          "destination_id": {
+            "$ref": "#/components/schemas/ResourceID"
+          },
+          "replay_of": {
+            "$ref": "#/components/schemas/ResourceID"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "retrying",
+              "delivering",
+              "succeeded",
+              "dead",
+              "canceled"
+            ]
+          },
+          "attempt_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "next_attempt_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "last_status_code": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 599,
+            "description": "Latest HTTP response status; zero means no HTTP response was recorded."
+          },
+          "last_error": {
+            "type": "string",
+            "description": "Safe error code. Response bodies and transport error details are never exposed."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "event_id",
+          "destination_id",
+          "status",
+          "attempt_count",
+          "next_attempt_at",
+          "last_status_code",
+          "last_error",
+          "created_at",
+          "updated_at"
+        ]
+      },
+      "Attempt": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^att_[0-9a-f]{36}$"
+          },
+          "number": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "delivering",
+              "succeeded",
+              "retrying",
+              "dead",
+              "abandoned"
+            ]
+          },
+          "status_code": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 599
+          },
+          "error_code": {
+            "type": "string"
+          },
+          "duration_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "format": "int64"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "number",
+          "status",
+          "status_code",
+          "error_code",
+          "duration_ms",
+          "started_at",
+          "finished_at"
+        ]
+      },
+      "EventDetail": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "event": {
+            "$ref": "#/components/schemas/Event"
+          },
+          "deliveries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Delivery"
+            },
+            "maxItems": 100,
+            "description": "Newest 100 delivery records. Use GET /api/v1/deliveries?event_id=... for complete paginated history."
+          }
+        },
+        "required": [
+          "event",
+          "deliveries"
+        ]
+      },
+      "DeliveryDetail": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "delivery": {
+            "$ref": "#/components/schemas/Delivery"
+          },
+          "attempts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Attempt"
+            },
+            "description": "Persisted attempts in ascending attempt-number order. Expired claims are recorded as abandoned."
+          }
+        },
+        "required": [
+          "delivery",
+          "attempts"
+        ]
+      },
+      "IngestEvent": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "destination_id": {
+            "$ref": "#/components/schemas/ResourceID"
+          },
+          "type": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120,
+            "pattern": "^[!-~]+$",
+            "description": "1–120 visible ASCII characters, without spaces."
+          },
+          "payload": {
+            "description": "Any valid JSON value, including objects, arrays, strings, numbers, booleans, or null. Hooklane stores the exact raw JSON value bytes captured from the request. Whitespace and key ordering inside that value affect its digest and idempotency comparison. The value defaults to a maximum of 1 MiB, configurable by the installation; the whole request is capped at that limit plus 16 KiB."
+          }
+        },
+        "required": [
+          "destination_id",
+          "type",
+          "payload"
+        ]
+      },
+      "IngestResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "event": {
+            "$ref": "#/components/schemas/Event"
+          },
+          "delivery": {
+            "$ref": "#/components/schemas/Delivery"
+          },
+          "duplicate": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "event",
+          "delivery",
+          "duplicate"
+        ]
+      },
+      "ReplayResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "delivery": {
+            "$ref": "#/components/schemas/Delivery"
+          },
+          "duplicate": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "delivery",
+          "duplicate"
+        ]
+      },
+      "Stats": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "destinations": {
+            "type": "integer",
+            "minimum": 0,
+            "format": "int64"
+          },
+          "events": {
+            "type": "integer",
+            "minimum": 0,
+            "format": "int64"
+          },
+          "pending": {
+            "type": "integer",
+            "minimum": 0,
+            "format": "int64"
+          },
+          "retrying": {
+            "type": "integer",
+            "minimum": 0,
+            "format": "int64"
+          },
+          "delivering": {
+            "type": "integer",
+            "minimum": 0,
+            "format": "int64"
+          },
+          "succeeded": {
+            "type": "integer",
+            "minimum": 0,
+            "format": "int64"
+          },
+          "dead": {
+            "type": "integer",
+            "minimum": 0,
+            "format": "int64"
+          },
+          "canceled": {
+            "type": "integer",
+            "minimum": 0,
+            "format": "int64"
+          }
+        },
+        "required": [
+          "destinations",
+          "events",
+          "pending",
+          "retrying",
+          "delivering",
+          "succeeded",
+          "dead",
+          "canceled"
+        ]
+      },
+      "Session": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "authenticated": {
+            "type": "boolean",
+            "const": true
+          }
+        },
+        "required": [
+          "authenticated"
+        ]
+      },
+      "Login": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "token": {
+            "type": "string",
+            "writeOnly": true,
+            "description": "Installation administrator token. The ingest-only token cannot create a management session."
+          }
+        },
+        "required": [
+          "token"
+        ]
+      },
+      "Health": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "unavailable"
+            ]
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "DestinationPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Destination"
+            },
+            "maxItems": 100
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass this opaque resource identifier as before to fetch the next page. null means no further page was observed."
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ]
+      },
+      "EventPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Event"
+            },
+            "maxItems": 100
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass this opaque resource identifier as before to fetch the next page. null means no further page was observed."
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ]
+      },
+      "DeliveryPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Delivery"
+            },
+            "maxItems": 100
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass this opaque resource identifier as before to fetch the next page. null means no further page was observed."
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ]
+      }
+    },
+    "responses": {
+      "Error400": {
+        "description": "Invalid JSON, resource identifier, input, filter, or idempotency key.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Error401": {
+        "description": "Administrator authentication is required; only ingestion also accepts the configured ingest token.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "headers": {
+          "WWW-Authenticate": {
+            "schema": {
+              "type": "string"
+            },
+            "description": "Bearer realm=\"hooklane\""
+          }
+        }
+      },
+      "Error403": {
+        "description": "Missing or mismatched Origin on a cookie-authenticated mutation, or mismatched Origin on login.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Error404": {
+        "description": "Resource or route not found.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Error409": {
+        "description": "Idempotency content conflict, incompatible resource state, or archived destination.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Error413": {
+        "description": "Payload or request body exceeds the configured endpoint limit.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Error415": {
+        "description": "Content-Type must be application/json for endpoints with a JSON request body.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Error429": {
+        "description": "Login attempts are rate limited. Retry-After is 6 seconds.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "headers": {
+          "Retry-After": {
+            "schema": {
+              "type": "string"
+            },
+            "description": "6 seconds."
+          }
+        }
+      },
+      "Error503": {
+        "description": "Service, authentication configuration, persistence, or validation is temporarily unavailable. An operation may have committed before the response failed; safely retry ingestion/replay with the same idempotency key.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    }
+  }
+}

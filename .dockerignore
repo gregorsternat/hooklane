@@ -9,3 +9,5 @@
 **/*.tsbuildinfo
 **/*.test
 docs
+.playwright-cli
+output

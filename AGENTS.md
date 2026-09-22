@@ -2,7 +2,7 @@
 
 ## Context
 - Hooklane is an Apache-2.0, self-hosted webhook delivery and replay project.
-- Today only the foundation runs. Do not describe planned delivery guarantees as implemented.
+- The v1 delivery path runs. Preserve the documented at-least-once guarantees and explicit limitations.
 - Read [architecture](docs/architecture.md) for design decisions and [roadmap](docs/roadmap.md) for scope.
 - Code, documentation, UI text, commits, and PRs are in English.
 
@@ -14,7 +14,7 @@
 - `Makefile`: canonical developer/CI commands and pinned Go tool versions.
 
 ## Commands
-- Setup: `make install`; copy `.env.example` to `.env` only if absent.
+- Setup: `make setup`, then `make install`; setup preserves existing configuration and generates only missing secrets.
 - Local development: `make dev-db`, then `make dev-api` and `make dev-web` in separate terminals.
 - Complete containerized app: `make up`; stop with `make down` (preserves data).
 - Format: `make fmt`. Verify: `make check`. Compile: `make build`.
@@ -26,7 +26,7 @@
 - Keep Go entrypoints thin and packages organized around concrete responsibilities.
 - Use standard `net/http`, contextual operations, wrapped errors, and structured `slog` logs.
 - Introduce interfaces at consumers only when a real boundary or test needs one.
-- Keep PostgreSQL as the source of truth; introduce Goose and sqlc with the first persistent feature.
+- Keep PostgreSQL as the source of truth; use embedded Goose migrations and regenerate checked-in sqlc queries with `make generate`.
 - Do not add empty layers, a generic repository framework, placeholder workers, or unused dependencies.
 - Keep TypeScript strict. Validate untrusted API responses; do not hide uncertainty with `any`.
 - Keep React state local until actual sharing is needed. Cancel requests on unmount.

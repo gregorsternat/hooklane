@@ -1,0 +1,15 @@
+# Used exclusively by scripts/smoke.sh under its unique Compose project.
+services:
+  receiver:
+    build:
+      context: .
+      target: receiver
+    environment:
+      LISTEN_ADDR: "0.0.0.0:8099"
+      HOOKLANE_SIGNING_SECRET: "smoke-signing-secret-at-least-32-characters"
+      FAIL_FIRST: "1"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL

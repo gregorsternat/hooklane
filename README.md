@@ -1,25 +1,52 @@
 # Hooklane
 
-Self-hosted webhook delivery and replay. Hooklane aims to receive events, persist
-them, and deliver them to your applications, including after outages.
+**Durable webhook delivery, inspection, and replay on your own infrastructure.**
+Hooklane accepts JSON events, stores delivery work atomically in PostgreSQL, signs
+outbound requests, retries temporary failures, and keeps an inspectable history.
+One Go application, one PostgreSQL database, and a React operations console.
+Apache-2.0 licensed; no broker or hosted account required.
 
-**Early development:** this repository currently contains the runnable foundation:
-a Go HTTP server, PostgreSQL connectivity, a React status page, Docker, and CI.
-Event ingestion, delivery, retries, authentication, and replay are **not implemented**.
+## What v1 includes
+
+- Protected management API and browser sessions, plus a separate ingestion token.
+- Destinations with encrypted signing secrets, pause/resume, rotation, and archive.
+- Atomic event acceptance, idempotency keys, bounded JSON payloads and cursor pagination.
+- Concurrent PostgreSQL workers, expiring claims, crash recovery, signed delivery,
+  timeouts, exponential backoff with jitter, and bounded `Retry-After` handling.
+- Event metadata, delivery status, attempt history, cancellation, and idempotent replay.
+- Responsive management console, event composer, filters, and integration guidance.
+- SSRF controls, payload redaction, automatic retention, protected Prometheus metrics,
+  health probes, graceful shutdown, and an example signature-verifying receiver.
+
+The delivery model is **at least once**. A receiver must deduplicate event IDs.
+Hooklane does not promise delivery ordering, unlimited retries, or exactly-once
+side effects. This version serves one trusted team per installation.
 
 ## Quick start
 
-Prerequisites: Docker with Compose v2 (`--wait` support) and Make. No local Go or
-Node installation is required for the containerized application.
+Install Docker with Compose v2, Make, and OpenSSL. Then:
 
 ```sh
-cp .env.example .env
+make setup
 make up
 ```
 
-Open [localhost:8088](http://localhost:8088). PostgreSQL is exposed on
-`127.0.0.1:5438`. Both ports bind to loopback only. The sample credentials are for
-local development. This unauthenticated foundation is not a public deployment.
+Open [localhost:8088](http://localhost:8088) and sign in using `ADMIN_TOKEN` from
+your local `.env` file. `make setup` creates the file if absent and generates
+missing secrets without replacing existing values. Keep `ENCRYPTION_KEY` safe;
+existing signing secrets cannot be decrypted without it.
+
+1. Configure your receiver with a random signing secret of at least 32 characters.
+2. Add a destination in the console with its HTTPS URL and the same secret.
+3. Send an event through the console or [HTTP API](docs/api.md).
+4. Inspect delivery attempts, fix a failing receiver, and replay a terminal delivery.
+
+For a local receiver, follow the explicit network opt-in in the
+[development receiver guide](examples/receiver/README.md).
+
+Compose binds the application and PostgreSQL to loopback (`8088` and `5438`).
+For public access, configure HTTPS and secure cookies using the
+[deployment guide](docs/operations.md). Do not expose the database port.
 
 ```sh
 curl http://127.0.0.1:8088/healthz
@@ -28,81 +55,64 @@ make logs
 make down
 ```
 
-`make down` preserves PostgreSQL data. `docker compose down --volumes` deletes it.
-Changing PostgreSQL initialization credentials does not change an existing volume's
-database users or passwords.
+`make down` preserves data. `docker compose down --volumes` deletes it.
+Changing PostgreSQL initialization credentials does not update an existing volume.
 
 ## Local development
 
-Use Go **1.27.1**, Node **24.21.0 LTS**, and pnpm **11.21.0**. Versions are recorded
-in `go.mod`, `.node-version`, and `web/package.json`; CI and Docker use the same
-versions. Install pnpm with `npm install --global pnpm@11.21.0` if needed.
+Use Go **1.27.1**, Node **24.21.0 LTS**, and pnpm **11.21.0**, matching the checked-in
+version files, Docker, and CI. Install pnpm with
+`npm install --global pnpm@11.21.0` if needed.
 
 ```sh
-cp .env.example .env # Only if .env does not already exist.
+make setup
 make install
 make dev-db
 make dev-api
 ```
 
-In a second terminal, run `make dev-web` and open
-[localhost:5173](http://localhost:5173). Stop the complete Docker stack with
-`make down` before starting a local API on the same port. Stop local processes with
-Ctrl+C. `make dev-api` sources the trusted local `.env` file using the shell;
-quote values containing shell metacharacters. The Go executable itself only reads
-process environment variables.
+Run `make dev-web` in a second terminal and open
+[localhost:5173](http://localhost:5173). Stop the Compose application before running
+a local API on its port. The Vite proxy sends API/health requests to Go. Secrets
+stay on the server and never belong in `VITE_*` variables.
 
-Vite proxies health checks and future `/api` requests to Go. Database credentials
-stay on the server; never prefix secrets with `VITE_`. The Go process starts during
-a database outage and reports readiness as unavailable until PostgreSQL recovers.
+`make dev-api` sources the trusted `.env` file; quote shell metacharacters.
+The binary itself reads only environment variables. Embedded Goose migrations
+run automatically before the API becomes ready. During database outages, liveness
+remains available and readiness reports unavailable; initialization retries.
 
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
-| `make help` | List commands |
-| `make install` | Install locked dependencies and pinned Go tools |
+| `make setup` | Create missing local configuration and secrets |
+| `make install` | Install locked dependencies and pinned quality tools |
 | `make up` / `make down` | Start / stop the full Docker stack |
 | `make dev-db` | Start PostgreSQL for local development |
-| `make dev-api` / `make dev-web` | Run the API / Vite in separate terminals |
-| `make fmt` | Format Go and frontend files |
-| `make check` | Formatting, lint, types, race tests, frontend tests, Go vulnerability check |
+| `make dev-api` / `make dev-web` | Run Go / Vite in separate terminals |
+| `make fmt` | Format Go and frontend sources |
+| `make check` | Format, lint, types, race tests, UI tests, vulnerability check |
 | `make build` | Build `.bin/hooklane` and `web/dist` |
-| `make smoke` | Build and test an isolated Docker stack, then remove its test volume |
+| `make generate` | Regenerate checked-in sqlc queries after SQL changes |
+| `make integration` | PostgreSQL behavior tests using `HOOKLANE_TEST_DATABASE_URL` |
+| `make smoke` | Isolated Docker end-to-end checks, then cleanup |
 
-After `make build`, run `DATABASE_URL='…' WEB_DIR=web/dist .bin/hooklane` to serve
-the built frontend with Go. Omit `WEB_DIR` for API-only local development.
-`make smoke` requires curl and uses ports 18088/15438 by default; override with
-`SMOKE_APP_PORT` / `SMOKE_POSTGRES_PORT` if needed. It never operates on the regular
-`hooklane` Compose project.
+`make integration` requires a **disposable** PostgreSQL database and creates isolated
+test schemas. `make smoke` requires Python 3 and curl; it uses ports `18088`/`15438`
+by default (`SMOKE_APP_PORT` / `SMOKE_POSTGRES_PORT` overrides) and its own temporary
+Compose project and volume. It checks a real signature-verifying receiver through
+an outage/retry/replay, authorization, persistence, database recovery and shutdown.
+Ordinary Go tests skip the PostgreSQL suite when its URL is absent; CI runs it
+explicitly against PostgreSQL 18.
 
-## Configuration
+## Documentation
 
-| Variable | Default / requirement |
-| --- | --- |
-| `DATABASE_URL` | Required; PostgreSQL URI or pgx keyword connection string |
-| `HTTP_ADDR` | `127.0.0.1:8088` locally; fixed to `0.0.0.0:8088` inside Docker |
-| `WEB_DIR` | Empty (static serving disabled); `/app/web` in Docker |
-| `LOG_LEVEL` | `info`; also `debug`, `warn`, `error` |
-| `READINESS_TIMEOUT` | `2s`; positive and below the HTTP write timeout of `10s` |
-| `SHUTDOWN_TIMEOUT` | `10s`; positive; keep below Compose's `30s` stop grace period |
-| `API_PROXY_TARGET` | Vite-only: `http://127.0.0.1:8088` |
-| `APP_PORT` / `POSTGRES_PORT` | Compose host ports: `8088` / `5438` |
-| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | Compose database settings; see `.env.example` |
+- [API and signature verification](docs/api.md) · [OpenAPI](docs/openapi.json)
+- [Architecture and delivery invariants](docs/architecture.md)
+- [Configuration, deployment, upgrades and backups](docs/operations.md)
+- [Roadmap and v1 boundaries](docs/roadmap.md)
+- [Example receiver](examples/receiver/README.md)
+- [Contributing](CONTRIBUTING.md) · [Agent instructions](AGENTS.md)
 
-When changing local ports or credentials, also update `DATABASE_URL` and
-`API_PROXY_TARGET` in `.env`. Compose constructs its internal connection from the
-`POSTGRES_*` settings; it does not use the host's `DATABASE_URL` or `HTTP_ADDR`.
-Special characters in a URI password must be percent-encoded.
-
-## Stack and documentation
-
-Go (`net/http`, `slog`, `pgx`), PostgreSQL 18, React, strict TypeScript, Vite, pnpm,
-and Docker Compose. No message broker is needed for the initial design.
-
-- [Architecture and delivery guarantees](docs/architecture.md)
-- [Roadmap](docs/roadmap.md)
-- [Contributing](CONTRIBUTING.md)
-- [Instructions for coding agents](AGENTS.md)
-
-Licensed under [Apache-2.0](LICENSE). Copyright 2026 Hooklane contributors.
+Go (`net/http`, `slog`, `pgx`, Goose, sqlc), PostgreSQL 18, React 19, strict
+TypeScript, Vite, pnpm and Docker Compose. Copyright 2026 Hooklane contributors.

@@ -10,9 +10,11 @@ import (
 
 func cleanEnv(t *testing.T) {
 	t.Helper()
-	for _, key := range []string{"HTTP_ADDR", "DATABASE_URL", "WEB_DIR", "LOG_LEVEL", "READINESS_TIMEOUT", "SHUTDOWN_TIMEOUT"} {
+	for _, key := range []string{"HTTP_ADDR", "DATABASE_URL", "WEB_DIR", "LOG_LEVEL", "READINESS_TIMEOUT", "SHUTDOWN_TIMEOUT", "ADMIN_TOKEN", "INGEST_TOKEN", "ENCRYPTION_KEY", "SECURE_COOKIES", "ALLOW_HTTP_DESTINATIONS", "DESTINATION_ALLOWED_CIDRS", "MAX_PAYLOAD_BYTES", "WORKER_CONCURRENCY", "MAX_ATTEMPTS", "DELIVERY_TIMEOUT", "WORKER_POLL_INTERVAL", "RETRY_BASE", "RETENTION"} {
 		t.Setenv(key, "")
 	}
+	t.Setenv("ADMIN_TOKEN", strings.Repeat("a", 32))
+	t.Setenv("ENCRYPTION_KEY", strings.Repeat("b", 64))
 	t.Setenv("DATABASE_URL", "postgres://hooklane:local@localhost:5438/hooklane?sslmode=disable")
 }
 
@@ -29,6 +31,24 @@ func TestDefaults(t *testing.T) {
 
 func TestInvalidConfiguration(t *testing.T) {
 	for _, tt := range []struct{ key, value string }{
+		{"ADMIN_TOKEN", ""},
+		{"ADMIN_TOKEN", "short"},
+		{"ADMIN_TOKEN", strings.Repeat("a", 32) + " b"},
+		{"INGEST_TOKEN", strings.Repeat("c", 32) + "\nb"},
+		{"INGEST_TOKEN", "short"},
+		{"INGEST_TOKEN", strings.Repeat("a", 32)},
+		{"ENCRYPTION_KEY", "invalid"},
+		{"SECURE_COOKIES", "maybe"},
+		{"ALLOW_HTTP_DESTINATIONS", "maybe"},
+		{"DESTINATION_ALLOWED_CIDRS", "127.0.0.1"},
+		{"MAX_PAYLOAD_BYTES", "0"},
+		{"MAX_PAYLOAD_BYTES", "10485761"},
+		{"WORKER_CONCURRENCY", "33"},
+		{"MAX_ATTEMPTS", "0"},
+		{"DELIVERY_TIMEOUT", "61s"},
+		{"WORKER_POLL_INTERVAL", "1ms"},
+		{"RETRY_BASE", "0s"},
+		{"RETENTION", "30m"},
 		{"DATABASE_URL", ""},
 		{"DATABASE_URL", "postgres://user:secret@[invalid"},
 		{"HTTP_ADDR", "localhost"},

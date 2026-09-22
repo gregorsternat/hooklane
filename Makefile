@@ -3,13 +3,18 @@ SHELL := /bin/sh
 
 GOLANGCI_VERSION := v2.13.2
 GOVULNCHECK_VERSION := v1.8.0
+SQLC_VERSION := v1.31.1
+SQLC := $(CURDIR)/.bin/sqlc-$(SQLC_VERSION)
 GOLANGCI := $(CURDIR)/.bin/golangci-lint-$(GOLANGCI_VERSION)
 GOVULNCHECK := $(CURDIR)/.bin/govulncheck-$(GOVULNCHECK_VERSION)
 
-.PHONY: help install tools up down logs dev-db dev-api dev-web fmt fmt-check lint test typecheck vuln check build smoke
+.PHONY: setup generate integration help install tools up down logs dev-db dev-api dev-web fmt fmt-check lint test typecheck vuln check build smoke
 
 help: ## Show available commands
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-14s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+
+setup: ## Create local configuration and generate required secrets once
+	sh scripts/setup.sh
 
 install: tools ## Install locked application dependencies and pinned Go tools
 	go mod download
@@ -26,6 +31,18 @@ $(GOVULNCHECK):
 	@mkdir -p .bin
 	GOBIN=$(CURDIR)/.bin go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
 	mv .bin/govulncheck $(GOVULNCHECK)
+
+$(SQLC):
+	@mkdir -p .bin
+	GOBIN=$(CURDIR)/.bin go install github.com/sqlc-dev/sqlc/cmd/sqlc@$(SQLC_VERSION)
+	mv .bin/sqlc $(SQLC)
+
+generate: $(SQLC) ## Regenerate typed PostgreSQL queries after SQL changes
+	$(SQLC) generate
+
+integration: ## Run PostgreSQL behavior tests against a disposable database URL
+	@test -n "$$HOOKLANE_TEST_DATABASE_URL" || (echo "Set HOOKLANE_TEST_DATABASE_URL to a disposable PostgreSQL database"; exit 1)
+	go test -race -count=1 ./internal/store
 
 up: ## Build and start the complete application in Docker
 	docker compose up --build --wait
