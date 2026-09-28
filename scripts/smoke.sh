@@ -51,7 +51,9 @@ echo 'Checking PostgreSQL outage and recovery...'
 compose stop db
 expect_status 200 /healthz
 expect_status 503 /readyz
-compose start --wait db
+# `docker compose start --wait` is not available in every supported Compose
+# release. The readiness probe loop below waits for PostgreSQL recovery instead.
+compose start db
 attempt=0
 until expect_status 200 /readyz; do
   attempt=$((attempt + 1))

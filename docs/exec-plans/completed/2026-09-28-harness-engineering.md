@@ -48,8 +48,10 @@ Docker Compose 5.1.2 and disposable PostgreSQL 18.4:
   queries confirmed no harness resources remained. Local credentials are ignored
   by Git and excluded from Docker build context.
 
-CI now invokes the same repository checks and the harness startup/diagnostics/
-cleanup path. Remote CI has not been run for these uncommitted changes.
+CI's first run passed `quality` and found that its older Docker Compose version
+does not accept `compose start --wait`. The smoke script now starts PostgreSQL
+without that flag and waits for `/readyz` to recover; `make smoke` passed again
+locally. The updated remote run is pending.
 
 ## Remaining work
 

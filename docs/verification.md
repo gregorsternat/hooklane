@@ -123,7 +123,8 @@ retry/replay API scenarios passed. Cleanup removed its containers, network and
 volume, confirmed by Docker labels. See the
 [completed plan](exec-plans/completed/2026-09-28-harness-engineering.md) for details.
 
-No UI behavior changed; no new real-browser evidence is claimed. Remote CI has
-not been executed for this local change. Remaining browser automation, historical
-telemetry and capacity/restore gaps are tracked in the
+No UI behavior changed; no new real-browser evidence is claimed. The first remote
+CI run passed `quality` and exposed a Docker Compose portability issue in `smoke`;
+the fix now passes `make smoke` locally, with updated remote checks pending.
+Remaining browser automation, historical telemetry and capacity/restore gaps are tracked in the
 [quality baseline](quality.md) and [debt tracker](exec-plans/tech-debt-tracker.md).
