@@ -1,5 +1,8 @@
 # Architecture
 
+Owner: maintainers
+Last reviewed: 2026-09-28
+
 ## Implemented system
 
 Hooklane v1 is a single Go application with a React management console and
@@ -32,6 +35,12 @@ lifecycle. SQL remains explicit; sqlc handles typed read queries while queue and
 transactional mutations use pgx directly. No generic repository framework or
 separate broker is involved. Interfaces live at HTTP and worker consumption
 boundaries for testing. A fixed worker pool avoids spawning unbounded deliveries.
+
+Dependency directions are executable in [architecture tests](../scripts/architecture_test.go):
+`cmd/api` composes config, HTTP, delivery and store; HTTP and delivery consume store;
+store consumes sqlc. Config and generated sqlc have no internal dependencies.
+Tests follow these edges too. [Engineering principles](principles.md) describe
+the corresponding frontend and logging checks and how to extend a boundary.
 
 Go serves compiled assets in Docker; Vite proxies API calls during development.
 The React UI uses Tailwind CSS 4, shadcn configuration and copied beUI registry

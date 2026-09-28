@@ -1,0 +1,35 @@
+# Disposable local runtime, always selected through scripts/harness.py.
+# !override requires Docker Compose 2.24.4 or newer.
+services:
+  app:
+    ports: !override
+      - "127.0.0.1::8088"
+    environment: !override
+      DATABASE_URL: "host=db port=5432 sslmode=disable"
+      PGUSER: hooklane
+      PGPASSWORD: "${HARNESS_DB_PASSWORD:?Use make harness-up}"
+      PGDATABASE: hooklane
+      HTTP_ADDR: "0.0.0.0:8088"
+      WEB_DIR: /app/web
+      LOG_LEVEL: info
+      ADMIN_TOKEN: "${HARNESS_ADMIN_TOKEN:?Use make harness-up}"
+      INGEST_TOKEN: "${HARNESS_INGEST_TOKEN:?Use make harness-up}"
+      ENCRYPTION_KEY: "${HARNESS_ENCRYPTION_KEY:?Use make harness-up}"
+      SECURE_COOKIES: "false"
+      ALLOW_HTTP_DESTINATIONS: "true"
+      DESTINATION_ALLOWED_CIDRS: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+      WORKER_POLL_INTERVAL: 100ms
+      RETRY_BASE: 200ms
+      MAX_ATTEMPTS: "4"
+  db:
+    ports: !override
+      - "127.0.0.1::5432"
+    environment: !override
+      POSTGRES_USER: hooklane
+      POSTGRES_PASSWORD: "${HARNESS_DB_PASSWORD:?Use make harness-up}"
+      POSTGRES_DB: hooklane
+  receiver:
+    environment: !override
+      LISTEN_ADDR: "0.0.0.0:8099"
+      HOOKLANE_SIGNING_SECRET: "${HARNESS_SIGNING_SECRET:?Use make harness-up}"
+      FAIL_FIRST: "1"

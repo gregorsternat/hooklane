@@ -1,6 +1,7 @@
 .git
 .github
 .bin
+.harness
 .env
 .env.*
 **/node_modules

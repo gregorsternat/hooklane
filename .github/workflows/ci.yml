@@ -60,3 +60,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: make smoke
+      - name: Start the isolated development harness
+        run: make harness-up
+      - name: Verify harness diagnostics
+        run: |
+          make harness-status
+          make harness-metrics
+      - name: Remove only the disposable harness
+        if: always()
+        run: |
+          if [ -f .harness/config.json ]; then make harness-down; fi

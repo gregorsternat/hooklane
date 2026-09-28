@@ -1,47 +1,48 @@
 # Working on Hooklane
 
-## Context
-- Hooklane is an Apache-2.0, self-hosted webhook delivery and replay project.
-- The v1 delivery path runs. Preserve the documented at-least-once guarantees and explicit limitations.
-- Read [architecture](docs/architecture.md) for design decisions and [roadmap](docs/roadmap.md) for scope.
-- Code, documentation, UI text, commits, and PRs are in English.
+Hooklane is an Apache-2.0, self-hosted webhook delivery and replay service.
+Preserve its documented at-least-once guarantees and explicit v1 limitations.
+Code, documentation, UI text, commits and PRs are in English.
+
+## Start here
+
+- [Engineering map](docs/index.md): choose the source relevant to the task.
+- [Architecture](docs/architecture.md): packages, dependency direction and delivery invariants.
+- [Roadmap](docs/roadmap.md): implemented scope and explicit exclusions.
+- [Principles](docs/principles.md): implementation rules and the change/review loop.
+- [Harness](docs/harness.md): isolated runtime, logs, metrics and browser checks.
+- [Verification](docs/verification.md): required commands and evidence boundaries.
+- [Quality](docs/quality.md): coverage and gaps by domain.
+- [Execution plans](docs/exec-plans/index.md): active work, decisions and technical debt.
+- [Contributing](CONTRIBUTING.md): contribution and PR requirements.
 
 ## Repository map
-- `cmd/api`: process wiring, signals, HTTP lifecycle, and PostgreSQL pool.
-- `internal/config`: environment validation; `internal/httpserver`: HTTP boundary.
-- `web`: React application, frontend tooling, and colocated tests.
-- `scripts/smoke.sh`: isolated Docker integration checks.
-- `Makefile`: canonical developer/CI commands and pinned Go tool versions.
+
+- `cmd/api`: process wiring, signals, HTTP lifecycle and PostgreSQL pool.
+- `internal/config`: configuration validation; `internal/httpserver`: HTTP boundary.
+- `internal/store`: transactions, queue, migrations and generated sqlc reads.
+- `internal/delivery`: outbound policy, signing, retries and retention.
+- `web`: strict React/TypeScript client, local components and colocated tests.
+- `scripts`: setup, isolated smoke/harness and repository policy checks.
+- `Makefile`: canonical developer/CI commands and pinned Go tools.
 
 ## Commands
-- Setup: `make setup`, then `make install`; setup preserves existing configuration and generates only missing secrets.
-- Local development: `make dev-db`, then `make dev-api` and `make dev-web` in separate terminals.
-- Complete containerized app: `make up`; stop with `make down` (preserves data).
-- Format: `make fmt`. Verify: `make check`. Compile: `make build`.
-- Integration: `make smoke`; it creates and deletes only its own isolated test volume.
+
+- Setup: `make setup`, then `make install`; use pinned runtime versions.
+- Development: `make dev-db`, then `make dev-api` and `make dev-web`.
+- Isolated worktree app: `make harness-up`; inspect with `make harness-status`.
+- Format: `make fmt`. Required before handoff: `make check` and `make build`.
+- HTTP, database, container or lifecycle changes also require `make smoke`.
+- Repository checks: `make harness-check`; SQL changes: `make generate`.
 - Focused tests: `go test ./internal/httpserver` or `pnpm --dir web test`.
-- Use versions in `go.mod`, `.node-version`, and `web/package.json`.
 
-## Implementation rules
-- Keep Go entrypoints thin and packages organized around concrete responsibilities.
-- Use standard `net/http`, contextual operations, wrapped errors, and structured `slog` logs.
-- Introduce interfaces at consumers only when a real boundary or test needs one.
-- Keep PostgreSQL as the source of truth; use embedded Goose migrations and regenerate checked-in sqlc queries with `make generate`.
-- Do not add empty layers, a generic repository framework, placeholder workers, or unused dependencies.
-- Keep TypeScript strict. Validate untrusted API responses; do not hide uncertainty with `any`.
-- Keep React state local until actual sharing is needed. Cancel requests on unmount.
-- Never expose credentials, connection strings, signing secrets, or event payloads in logs or the UI.
-- Never put secrets in `VITE_*` variables; these are public browser configuration.
+## Non-negotiable boundaries
+
+- PostgreSQL is the source of truth. Follow the [delivery invariants](docs/architecture.md#future-delivery-invariants).
+- Validate untrusted API responses; use strict TypeScript and cancel requests on teardown.
+- Never expose credentials, connection strings, signing secrets or event payloads in logs or the UI.
+- Never put secrets in `VITE_*` variables; browser configuration is public.
 - Preserve readiness/liveness separation and bounded network operations.
-- Follow [delivery invariants](docs/architecture.md#future-delivery-invariants) when implementing the engine.
-
-## Verification and changes
-- Test meaningful behavior and failure paths; avoid tests that only mirror implementation.
-- Run affected checks while iterating, then `make check` and `make build` before handoff.
-- Run `make smoke` after HTTP, PostgreSQL, container, or startup/shutdown changes.
-- Report which checks passed and which were blocked; do not equate compilation with runtime validation.
-- Commit lockfiles. Checks/builds must not rewrite tracked files or add generated artifacts.
-- Keep documentation synchronized with commands and actual behavior; link rather than duplicate.
-- Document consequential architecture changes; avoid adding an ADR for routine code choices.
-- Use scoped Conventional Commits, e.g. `feat(delivery): add retry scheduling`.
-- Keep changes focused and preserve unrelated work. See [contribution guide](CONTRIBUTING.md).
+- Preserve unrelated work. Checks/builds must not rewrite tracked files.
+- Record actual checks and blocked checks; compilation is not runtime validation.
+- Keep consequential decisions, plans and current behavior discoverable in Git.

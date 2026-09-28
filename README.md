@@ -91,15 +91,19 @@ remains available and readiness reports unavailable; initialization retries.
 | `make dev-db` | Start PostgreSQL for local development |
 | `make dev-api` / `make dev-web` | Run Go / Vite in separate terminals |
 | `make fmt` | Format Go and frontend sources |
-| `make check` | Format, lint, types, race tests, UI tests, vulnerability check |
+| `make check` | Repository policies, format, lint, types, race/UI tests, vulnerability check |
+| `make harness-check` | Documentation, architecture and harness regression checks |
+| `make harness-up` / `make harness-down` | Start / remove a disposable app per worktree |
+| `make harness-status` / `make harness-logs` / `make harness-metrics` | Inspect isolated runtime evidence |
 | `make build` | Build `.bin/hooklane` and `web/dist` |
 | `make generate` | Regenerate checked-in sqlc queries after SQL changes |
 | `make integration` | PostgreSQL behavior tests using `HOOKLANE_TEST_DATABASE_URL` |
 | `make smoke` | Isolated Docker end-to-end checks, then cleanup |
 
 `make integration` requires a **disposable** PostgreSQL database and creates isolated
-test schemas. `make smoke` requires Python 3 and curl; it uses ports `18088`/`15438`
-by default (`SMOKE_APP_PORT` / `SMOKE_POSTGRES_PORT` overrides) and its own temporary
+test schemas. `make check` requires Python 3 for repository policies. `make smoke`
+requires Python 3 and curl; it uses automatically assigned loopback ports
+(`SMOKE_APP_PORT` / `SMOKE_POSTGRES_PORT` overrides) and its own temporary
 Compose project and volume. It checks a real signature-verifying receiver through
 an outage/retry/replay, authorization, persistence, database recovery and shutdown.
 Ordinary Go tests skip the PostgreSQL suite when its URL is absent; CI runs it
@@ -107,6 +111,7 @@ explicitly against PostgreSQL 18.
 
 ## Documentation
 
+- [Engineering map](docs/index.md) · [Isolated development harness](docs/harness.md)
 - [API and signature verification](docs/api.md) · [OpenAPI](docs/openapi.json)
 - [Architecture and delivery invariants](docs/architecture.md)
 - [Configuration, deployment, upgrades and backups](docs/operations.md)

@@ -8,7 +8,7 @@ SQLC := $(CURDIR)/.bin/sqlc-$(SQLC_VERSION)
 GOLANGCI := $(CURDIR)/.bin/golangci-lint-$(GOLANGCI_VERSION)
 GOVULNCHECK := $(CURDIR)/.bin/govulncheck-$(GOVULNCHECK_VERSION)
 
-.PHONY: setup generate integration help install tools up down logs dev-db dev-api dev-web fmt fmt-check lint test typecheck vuln check build smoke
+.PHONY: setup generate integration help install tools up down logs dev-db dev-api dev-web fmt fmt-check lint test typecheck vuln check build smoke docs-check harness-check harness-up harness-status harness-logs harness-metrics harness-down
 
 help: ## Show available commands
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-14s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -84,7 +84,29 @@ typecheck: ## Check frontend types
 vuln: tools ## Check reachable Go vulnerabilities
 	$(GOVULNCHECK) ./...
 
-check: fmt-check lint typecheck test vuln ## Run the same quality checks as CI
+docs-check: ## Check local documentation links, navigation, plans and review dates
+	PYTHONDONTWRITEBYTECODE=1 python3 scripts/check_docs.py
+
+harness-check: docs-check ## Check repository boundaries and harness regression cases
+	go test ./scripts
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_*.py'
+
+harness-up: ## Start an isolated worktree app, database and signed receiver
+	python3 scripts/harness.py up
+
+harness-status: ## Show isolated runtime addresses and probe health/readiness
+	python3 scripts/harness.py status
+
+harness-logs: ## Show recent isolated app and receiver logs
+	python3 scripts/harness.py logs
+
+harness-metrics: ## Query isolated authenticated metrics without printing credentials
+	python3 scripts/harness.py metrics
+
+harness-down: ## Remove only this worktree's disposable harness containers and volume
+	python3 scripts/harness.py down
+
+check: harness-check fmt-check lint typecheck test vuln ## Run the same quality checks as CI
 
 build: ## Build the Go binary and production frontend
 	@mkdir -p .bin
