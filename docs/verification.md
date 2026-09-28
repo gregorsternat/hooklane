@@ -1,9 +1,19 @@
 # Verification
 
+Owner: maintainers
+Last reviewed: 2026-09-28
+
 The canonical local/CI checks are `make check`, `make build`, `make integration`
 and `make smoke`. Runtime versions are pinned in the repository. Normal tests
 skip PostgreSQL cases when `HOOKLANE_TEST_DATABASE_URL` is absent; the integration
 command refuses to run without it. Always use a disposable database.
+
+`make check` also runs the [repository harness checks](harness.md#automated-feedback):
+local documentation links/anchors, ownership and review dates, plan lifecycle,
+Go dependency/logging boundaries, and checker regression tests. Frontend lint
+enforces the validating API boundary and generic component dependency direction,
+including deliberate violation fixtures. These structural checks complement the
+behavior suite; they do not prove documentation semantics or complete privacy.
 
 ## Behavior covered
 
@@ -100,3 +110,21 @@ database were not used for test writes.
 
 These are functional and concurrency checks on synthetic local data. They do not
 establish a production SLA or long-term analytics coverage.
+
+## Harness engineering verification
+
+Verified locally on 2026-09-28 with the pinned Go 1.27.1, Node 24.21.0 and
+pnpm 11.21.0, Docker Compose 5.1.2 and disposable PostgreSQL 18.4.
+`make check`, `make build`, `make integration` and `make smoke` passed.
+The policy tests include deliberately invalid docs/imports and isolation failures.
+The isolated harness started alongside the separate smoke project with assigned
+loopback ports. Health, readiness, authenticated metrics, safe logs and the signed
+retry/replay API scenarios passed. Cleanup removed its containers, network and
+volume, confirmed by Docker labels. See the
+[completed plan](exec-plans/completed/2026-09-28-harness-engineering.md) for details.
+
+No UI behavior changed; no new real-browser evidence is claimed. The first remote
+CI run passed `quality` and exposed a Docker Compose portability issue in `smoke`;
+the fix now passes `make smoke` locally, with updated remote checks pending.
+Remaining browser automation, historical telemetry and capacity/restore gaps are tracked in the
+[quality baseline](quality.md) and [debt tracker](exec-plans/tech-debt-tracker.md).

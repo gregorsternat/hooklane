@@ -1,5 +1,8 @@
 # HTTP API and receiver protocol
 
+Owner: maintainers
+Last reviewed: 2026-09-28
+
 Base path: `/api/v1`. Use JSON with `Content-Type: application/json`. Full machine
 readable schemas are in [openapi.json](openapi.json). The service returns safe
 errors as `{"error":{"code":"…","message":"…"}}`; no database or receiver error

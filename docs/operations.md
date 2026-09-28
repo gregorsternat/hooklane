@@ -1,5 +1,8 @@
 # Operating Hooklane
 
+Owner: maintainers
+Last reviewed: 2026-09-28
+
 ## Configuration
 
 `make setup` generates missing local secrets; production must inject stable secrets

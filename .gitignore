@@ -13,3 +13,6 @@ coverage/
 # Local browser verification artifacts
 output/playwright/
 .playwright-cli/
+
+# Worktree-local disposable harness configuration
+.harness/

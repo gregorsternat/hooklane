@@ -1,5 +1,8 @@
 # Roadmap
 
+Owner: maintainers
+Last reviewed: 2026-09-28
+
 ## v1 — implemented
 
 | Milestone | Delivered behavior |

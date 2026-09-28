@@ -8,7 +8,9 @@ Hooklane v1 implements a single-team webhook delivery service. Start with the
 1. Describe the problem and expected behavior in an issue or PR. For significant
    design changes, discuss the approach before building a large implementation.
 2. Create a focused branch. Implement the smallest complete behavior, including
-   relevant failure paths and documentation updates.
+   relevant failure paths and documentation updates. Cross-boundary changes use a
+   versioned [execution plan](docs/exec-plans/index.md) with acceptance criteria,
+   progress, decisions and validation evidence.
 3. Run `make fmt`, `make check`, and `make build`. For changes involving HTTP,
    PostgreSQL, containers, or process lifecycle, also run `make smoke`.
 4. Open a PR explaining the problem, resulting behavior, validation, and any
@@ -31,6 +33,11 @@ Coding agents start with [AGENTS.md](AGENTS.md) and follow its links only as nee
 Human contributors remain responsible for understanding, reviewing, and validating
 their changes. Keep agent instructions short and specific to this repository.
 Do not add duplicate tool-specific instruction files or commit chat transcripts.
+Use the [isolated harness](docs/harness.md) to reproduce runtime behavior without
+sharing a database or fixed ports with another checkout. `make check` includes
+repository structure, documentation freshness/link and architecture checks.
+Review your final diff, update affected documentation and its review date, and
+record unresolved gaps in the [quality baseline](docs/quality.md) and debt tracker.
 
 ## License
 
