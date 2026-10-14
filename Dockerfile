@@ -6,7 +6,7 @@ RUN pnpm install --frozen-lockfile
 COPY web/ ./
 RUN pnpm build
 
-FROM golang:1.27.1-alpine AS go-build
+FROM golang:1.27.2-alpine AS go-build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
